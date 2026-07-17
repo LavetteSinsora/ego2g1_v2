@@ -46,6 +46,38 @@ uv run python -m pytest tests/ -q         # 203 pass on a working setup
 source envs/<machine>.sh   # mac-dev | ppu-train | ppu-serve | robot
 ```
 
+## The whole lifecycle, one screen
+
+Raw recordings → dataset → checkpoint → serving → robot. Full detail per
+area in docs/; machine profiles in envs/ (see docs/environments.md).
+
+```bash
+# 1. DATA (mac-dev) — Pico hdf5 in data/put_bottle_in_box_ego/ -> LeRobot dataset
+uv run python -m ego2g1.data.run_pipeline --jobs 4          # docs/data.md
+uv run python -m ego2g1.data.dashboard episode_1 -o report.html   # verify by eye
+uv run python -m ego2g1.data.teleop_import --source data/<teleop-rec> --repo-id ego2g1/<name>_teleop
+
+# 2. TRAIN (PPU box — borrowed venv, NOT uv)                # docs/training.md
+source envs/ppu-train.sh
+python -m ego2g1.train.compute_norm_stats                   # after any dataset change
+python -m ego2g1.train.train --exp-name my_run
+
+# 3. SERVE (PPU box, one pinned NPU)
+source envs/ppu-serve.sh
+python -m ego2g1.serve --checkpoint checkpoints/ego2g1_pi05/<exp>/best/<step>
+
+# 4. DEPLOY (robot PC / this mac on the 192.168.123.x subnet)   # docs/deploy.md
+uv sync --group deploy                                      # once; needs CYCLONEDDS_HOME
+uv run python -m ego2g1.deploy.check listen                 # then walk the rung ladder
+uv run python -m ego2g1.deploy.replay_dataset --dataset data/lerobot_datasets/ego2g1/put_bottle_in_box_ego
+uv run python -m ego2g1.deploy.check latency --host <serve-box>
+uv run python -m ego2g1.deploy.runner --host <serve-box> --port 8000 --mode sync
+
+# 5. TELEOP (optional; bare-hand WebXR)                     # tools/teleop/README.md
+uv sync --group teleop
+uv run python -m tools.teleop --sim                         # mjpython on macOS
+```
+
 ## Where things stand
 
 - Extraction, training, serving, deploy, teleop all ported; 203 tests pass.
