@@ -188,3 +188,43 @@ python -m ego2g1.deploy.replay_diag --dataset ...    # instrumented rung 6: loop
 
 `replay_diag` prints the source data's accel RMS up front — if that is ~26
 rad/s², the judder is in the data and no deploy knob will remove it.
+
+## Observability
+
+The jitter was only diagnosable because the old loop could be watched live and
+replayed offline (`docs/jitter_root_cause.md`); both tools are ported. Both
+are pure add-ons: the loop's threads gain no code, telemetry is PULLED —
+`telemetry()` reads existing state under existing locks, nothing pushes.
+
+**Live dashboard** — `--dashboard` on the runner serves a one-page monitor
+(default `:8080`, own daemon thread, ~10 Hz HTTP pulls): active chunk +
+pointer, the commanded 26-dim row, inference light, DelayBudget stats,
+clamp/watchdog counters, camera frame. GET is pure telemetry; the only live
+control is the E-STOP button (POST → `watchdog.trip` → `damp()`). Off by
+default.
+
+```bash
+python -m ego2g1.deploy.runner --host <serve-box> --prompt "..." --dashboard
+python -m ego2g1.deploy.dashboard --demo     # page dev: synthetic data, no hardware
+```
+
+**Session reconstruction** — any recording (`recordings/<task>_<stamp>/`,
+written by every non-`--no-record` run) rebuilds at any monotonic time t,
+offline, no robot/JAX/mujoco:
+
+```bash
+python -m ego2g1.deploy.replay_record recordings/<session>           # timeline
+python -m ego2g1.deploy.replay_record recordings/<session> --at 12.3 # state at t
+```
+
+```python
+from ego2g1.deploy.replay_record import Session
+s = Session("recordings/...")
+s.at(t)         # chunk state + pointer, commanded row, phase, frame ids
+s.chunk_at(t)   # the (H, 26) chunk itself + index
+```
+
+Async modes are reconstructed by re-feeding the REAL buffer classes the
+recorded install/pop sequence, so the splice math cannot drift from live. To
+make that exact, `infer_result` events carry the converted joint chunk
+(`actions`) and `meta.json` the strategy params — the only schema additions.

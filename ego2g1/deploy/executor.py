@@ -86,6 +86,7 @@ class UnitreeExecutor:
         self._lock = threading.Lock()
         self._last_q: np.ndarray | None = None
         self._last_q_change_t = time.monotonic()
+        self._last_sent: tuple[float, np.ndarray] | None = None  # telemetry only
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -162,6 +163,9 @@ class UnitreeExecutor:
             t_target = time.monotonic() + 2 * self.control_dt
         self._robot.send_action(self._torch.from_numpy(row.astype(np.float32)),
                                 t_target)
+        # `row` is our private copy and never mutated again: a plain reference
+        # swap is enough for the dashboard's pull-side read. No lock, no copy.
+        self._last_sent = (float(t_target), row)
         self._first_send = False
 
     def hold(self) -> None:
@@ -170,6 +174,19 @@ class UnitreeExecutor:
         row = np.zeros(_actions.ROBOT_DIM)
         row[_actions.ARM] = q
         self.send(row)
+
+    # --- telemetry (dashboard pull side; reads only, existing lock only) -----
+
+    def telemetry(self) -> dict:
+        last = self._last_sent            # reference swap; safe plain read
+        with self._lock:
+            q = None if self._last_q is None else self._last_q.copy()
+            age = time.monotonic() - self._last_q_change_t
+        return {"last_row": None if last is None else last[1].tolist(),
+                "last_t_target": None if last is None else last[0],
+                "arm_q": None if q is None else q.tolist(),
+                "state_age": age,
+                "estopped": self._estopped}
 
     # --- e-stop ---------------------------------------------------------------
 
@@ -268,6 +285,14 @@ class MockExecutor:
         row = np.zeros(_actions.ROBOT_DIM)
         row[_actions.ARM] = self._q
         self.send(row)
+
+    def telemetry(self) -> dict:
+        last = self.sent[-1] if self.sent else None
+        return {"last_row": None if last is None else last[1].tolist(),
+                "last_t_target": None if last is None else last[0],
+                "arm_q": self._q.tolist(),
+                "state_age": self.state_age(),
+                "estopped": self._estopped}
 
     def damp(self) -> None:
         self._estopped = True

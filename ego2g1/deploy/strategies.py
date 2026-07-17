@@ -9,7 +9,11 @@ each flagged [ego2g1] below:
     because these were logged),
   * every infer latency is fed to an optional DelayBudget (latency.py),
   * pop_action never blocks silently: the runner owns starvation via the
-    Watchdog instead of a bare spin.
+    Watchdog instead of a bare spin,
+  * a `telemetry()` snapshot on every strategy/buffer for the live dashboard
+    (deploy/dashboard.py). PULL-only: telemetry() reads existing state under
+    the buffer's existing lock and copies small values; the loop and worker
+    bodies gain no code for it.
 
 The five strategies (runner --mode names):
 
@@ -75,12 +79,31 @@ class SynchronousStrategy:
             if self._budget is not None:
                 self._budget.observe(elapsed)
             if self._recorder is not None:
+                # `actions` makes the chunk reconstructable offline
+                # (replay_record.py); ~H*26 floats once per chunk.
                 self._recorder.log("infer_result", latency=elapsed,
-                                   horizon=len(self._chunk), mode="sync")
+                                   horizon=len(self._chunk), mode="sync",
+                                   actions=self._chunk)
             self._index = 0
 
     def has_action(self) -> bool:
         return self._chunk is not None and self._index < len(self._chunk)
+
+    def telemetry(self) -> dict:
+        """Dashboard snapshot. Plain reads only — the loop thread may swap the
+        chunk mid-read; a one-poll-stale value is harmless. `inferring` is
+        derived, not flagged: sync blocks in update_observation exactly while
+        the current chunk is absent or drained."""
+        chunk = self._chunk
+        index = int(self._index)
+        ready = chunk is not None
+        horizon = len(chunk) if ready else 0
+        return {"mode": "sync", "rtc": False, "ready": ready,
+                "horizon": horizon, "index": min(index, horizon),
+                "inferring": (not ready) or index >= horizon,
+                "pending": False,
+                "trigger": horizon or None, "d": None,
+                "budget": None if self._budget is None else self._budget.stats()}
 
     def pop_action(self) -> np.ndarray:
         if not self.has_action():
@@ -135,6 +158,17 @@ class NaiveAsyncBuffer:
         with self._lock:
             return self._global_t
 
+    def telemetry(self) -> dict:
+        """[ego2g1] dashboard snapshot; own lock only, small copies."""
+        with self._lock:
+            ready = self._chunk is not None
+            horizon = len(self._chunk) if ready else 0
+            index = (int(np.clip(self._global_t - self._chunk_start_t, 0, horizon))
+                     if ready else 0)
+            return {"ready": ready or self._last_action is not None,
+                    "horizon": horizon, "index": index,
+                    "global_t": int(self._global_t)}
+
 
 class TemporalEnsemblingBuffer:
     """Aggregate every chunk that predicts the current global timestep."""
@@ -183,6 +217,16 @@ class TemporalEnsemblingBuffer:
     def current_timestep(self) -> int:
         with self._lock:
             return self._current_t
+
+    def telemetry(self) -> dict:
+        """[ego2g1] dashboard snapshot. No single active chunk exists here
+        (every live chunk votes), so horizon is 0 and `votes` says how many."""
+        with self._lock:
+            votes = len(self._predictions.get(self._current_t, ()))
+            return {"ready": bool(votes) or self._last_action is not None,
+                    "horizon": 0, "index": 0,
+                    "global_t": int(self._current_t),
+                    "votes": votes, "chunks": int(self._inference_count)}
 
 
 class TemporalSmoothingBuffer:
@@ -263,6 +307,18 @@ class TemporalSmoothingBuffer:
         with self._lock:
             return self._global_t
 
+    def telemetry(self) -> dict:
+        """[ego2g1] dashboard snapshot. horizon/index reconstruct the current
+        combined (blended) chunk: `_steps_since_update` rows consumed since the
+        last install, `len(_chunk)` still queued."""
+        with self._lock:
+            remaining = len(self._chunk)
+            consumed = int(self._steps_since_update)
+            return {"ready": remaining > 0,
+                    "horizon": remaining + consumed, "index": consumed,
+                    "global_t": int(self._global_t),
+                    "steps_since_update": consumed}
+
 
 class AsyncStrategy:
     """Background inference worker feeding one of the buffers above.
@@ -282,6 +338,7 @@ class AsyncStrategy:
         control_hz: float = 0,
         recorder=None,
         budget=None,
+        mode: str = "async",           # [ego2g1] telemetry label only
     ) -> None:
         if inference_hz <= 0:
             raise ValueError("inference_hz must be positive")
@@ -301,6 +358,7 @@ class AsyncStrategy:
         self._delays: deque[float] = deque(maxlen=20)
         self._recorder = recorder
         self._budget = budget
+        self._mode = mode
         self._thread = threading.Thread(target=self._inference_loop,
                                         name="ego2g1-inference", daemon=True)
         self._thread.start()
@@ -326,6 +384,19 @@ class AsyncStrategy:
             self._stopping = True
             self._condition.notify_all()
         self._thread.join(timeout=2.0)
+
+    def telemetry(self) -> dict:
+        """[ego2g1] dashboard snapshot: the buffer's own snapshot plus the
+        strategy-level facts. Reads only — a request-in-flight light would need
+        a flag write in the worker body, so it is deliberately not surfaced;
+        the DelayBudget stats carry the latency story instead."""
+        t = self._buffer.telemetry() if hasattr(self._buffer, "telemetry") else {}
+        return {"mode": self._mode, "rtc": self._rtc,
+                "inferring": False, "pending": False, "trigger": None,
+                "d": self._predicted_delay_steps() if self._rtc else None,
+                "worker_dead": self._error is not None,
+                "budget": None if self._budget is None else self._budget.stats(),
+                **t}
 
     def _raise_worker_error(self) -> None:
         if self._error is not None:
@@ -361,10 +432,12 @@ class AsyncStrategy:
                     self._budget.observe(elapsed)
                 info = self._buffer.add_chunk(actions, start_timestep) or {}
                 if self._recorder is not None:                     # [ego2g1]
+                    # `actions` (the converted joint chunk) makes the buffer
+                    # reconstructable offline (replay_record.py).
                     self._recorder.log("infer_result", latency=elapsed,
                                        start_timestep=start_timestep,
                                        horizon=len(actions), rtc=self._rtc,
-                                       splice=info)
+                                       splice=info, actions=actions)
 
                 with self._condition:
                     deadline = start_time + self._period
@@ -397,20 +470,21 @@ def make_strategy(mode: str, policy, *, chunk_size: int, inference_hz: float = 4
                                    recorder=recorder, budget=budget)
     if mode == "async":
         return AsyncStrategy(policy, NaiveAsyncBuffer(), inference_hz,
-                             recorder=recorder, budget=budget)
+                             recorder=recorder, budget=budget, mode=mode)
     if mode == "temporal_ensembling":
         return AsyncStrategy(policy, TemporalEnsemblingBuffer(exp_weight_m),
-                             inference_hz, recorder=recorder, budget=budget)
+                             inference_hz, recorder=recorder, budget=budget,
+                             mode=mode)
     if mode == "temporal_smoothing":
         return AsyncStrategy(
             policy, TemporalSmoothingBuffer(max_latency_steps, min_smooth_steps),
-            inference_hz, recorder=recorder, budget=budget)
+            inference_hz, recorder=recorder, budget=budget, mode=mode)
     if mode == "rtc":
         return AsyncStrategy(
             policy, TemporalSmoothingBuffer(max_latency_steps, min_smooth_steps),
             inference_hz, rtc=True,
             execute_horizon=rtc_execute_horizon or chunk_size,
-            control_hz=control_hz, recorder=recorder, budget=budget)
+            control_hz=control_hz, recorder=recorder, budget=budget, mode=mode)
     raise ValueError(f"Unsupported inference mode: {mode}")
 
 

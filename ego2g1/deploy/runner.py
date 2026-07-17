@@ -90,6 +90,7 @@ class DeployRunner:
         # model's state hand-block is the command stream, never encoders.
         self.last_hands = {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS}
         self.steps_executed = 0
+        self.running = False       # set/cleared around run(); read by telemetry()
 
     # --- seams ----------------------------------------------------------------
 
@@ -109,6 +110,7 @@ class DeployRunner:
 
     def run(self) -> None:
         self.clamp.reset(self.executor.arm_q())
+        self.running = True
         try:
             for step in range(self.max_steps):
                 t_cycle_end = self._clock() + self.dt
@@ -164,9 +166,78 @@ class DeployRunner:
                 if (step + 1) % 50 == 0:
                     logger.info("executed %d steps", step + 1)
         finally:
+            self.running = False
             self.strategy.close()
             if self.watchdog.tripped:
                 logger.error("stopped by watchdog: %s", self.watchdog.reason)
+
+    # --- observability (deploy/dashboard.py) -----------------------------------
+
+    def estop(self, reason: str = "external") -> None:
+        """Trip the watchdog from outside the loop (the dashboard's E-STOP
+        button). Routes through the normal trip path: recorder + damp()."""
+        self.watchdog.trip(reason)
+
+    def telemetry(self) -> dict:
+        """A JSON-serializable snapshot for the live dashboard. Called ONLY
+        from the dashboard's HTTP thread (~10 Hz), never from the loop. Pure
+        pull: the strategy/executor telemetry() below read existing state
+        under their own existing locks and copy small arrays — the loop body,
+        the inference worker, and the vendored 500 Hz thread gain no code."""
+        now = self._clock()
+        st = self.strategy.telemetry() if hasattr(self.strategy, "telemetry") else {}
+        ex = self.executor.telemetry() if hasattr(self.executor, "telemetry") else {}
+        ready = bool(st.get("ready"))
+        horizon = int(st.get("horizon") or 0)
+        index = int(st.get("index") or 0)
+        budget = st.get("budget")
+        groups = [{"label": "L-arm", "start": 0, "stop": 7},
+                  {"label": "R-arm", "start": 7, "stop": _actions.ARM_DOF}]
+        for h in layout.HANDS:
+            groups.append({"label": f"{h[0].upper()}-hand",
+                           "start": _actions.HAND[h].start,
+                           "stop": _actions.HAND[h].stop})
+        return {
+            "now": now,
+            "mode": st.get("mode", "?"),
+            "server_rtc": bool(st.get("rtc")),
+            "active": self.running and not self.watchdog.tripped,
+            "recording": not isinstance(self.recorder, _recorder.NullRecorder),
+            "has_dataset": False,      # this runner has no episode reset
+            "task": getattr(self.adapter, "prompt", ""),
+            "horizon": horizon, "fps": self.fps, "dim": _actions.ROBOT_DIM,
+            # --- the strategy's core data structure ---
+            "ready": ready,
+            "index": index,
+            # pop and send happen in the SAME tick here: robot-now == pointer
+            "wall_slot": index if ready else None,
+            "trigger": st.get("trigger"),
+            "d": st.get("d") if st.get("d") is not None
+                 else (budget or {}).get("d"),
+            "action_row": ex.get("last_row"),
+            "row_slot": max(0, index - 1) if ready else None,
+            "groups": groups,
+            # --- inference lifecycle ---
+            "inferring": bool(st.get("inferring")),
+            "pending": bool(st.get("pending")),
+            "worker_dead": bool(st.get("worker_dead")),
+            "last_splice": {},
+            # --- health / timing ---
+            "stats": {"ticks": int(self.steps_executed),
+                      "chunks": (budget or {}).get("n"),
+                      "votes": st.get("votes")},
+            "budget": budget,
+            "runway_s": (horizon - index) / self.fps if ready else None,
+            "camera_age": (float(self.camera.age())
+                           if self.camera is not None else None),
+            "clamped_ticks": int(self.clamp.clamped_ticks),
+            "watchdog": {"tripped": bool(self.watchdog.tripped),
+                         "reason": self.watchdog.reason},
+            # --- executor ---
+            "arm_q": ex.get("arm_q"),
+            "state_age": ex.get("state_age"),
+            "estopped": bool(ex.get("estopped")),
+        }
 
 
 # --- CLI assembly -----------------------------------------------------------------
@@ -197,6 +268,9 @@ class Args:
     max_pos_speed: float | None = None # soften the interpolator cap for bring-up
     camera_host: str = "192.168.123.164"
     eye: str = "left"
+    # --- observability ---
+    dashboard: bool = False            # live web monitor (deploy/dashboard.py)
+    dashboard_port: int = 8080
     # --- session ---
     record_dir: str = "recordings"
     no_record: bool = False
@@ -250,6 +324,11 @@ def main(args: Args) -> None:
             "mode": args.mode, "action_mode": action_mode, "horizon": horizon,
             "fps": fps, "host": args.host, "port": args.port,
             "prompt": args.prompt, "dim": _actions.ROBOT_DIM,
+            # strategy params, so replay_record.py can rebuild the exact buffer
+            "inference_hz": args.inference_hz,
+            "exp_weight_m": args.exp_weight_m,
+            "max_latency_steps": args.max_latency_steps,
+            "min_smooth_steps": args.min_smooth_steps,
         })
     rec.start()
 
@@ -285,11 +364,20 @@ def main(args: Args) -> None:
             rec.log("latency_check", **dataclasses.asdict(report))
             adapter.reset()   # the probe chunks polluted the causal filters
 
-        input("Robot connected, latency OK. Press Enter to start inference...")
         runner = DeployRunner(adapter=adapter, strategy=strategy,
                               executor=executor, camera=cam, recorder=rec,
                               limits=limits, fps=fps, max_steps=args.max_steps)
-        runner.run()
+        dash = None
+        if args.dashboard:
+            from .dashboard import Dashboard
+            dash = Dashboard(runner, port=args.dashboard_port)
+            dash.start()   # up before the prompt, so the page shows the hold
+        input("Robot connected, latency OK. Press Enter to start inference...")
+        try:
+            runner.run()
+        finally:
+            if dash is not None:
+                dash.stop()
     except KeyboardInterrupt:
         logger.info("interrupted")
     except _latency.LatencyBudgetError:

@@ -13,15 +13,17 @@ at the existing seams and replay them offline.
 
 Event kinds the new runner emits (each carries `t` monotonic + `kind`):
 
-    meta            once: mode, action_mode, horizon, fps, hosts
+    meta            once: mode, action_mode, horizon, fps, hosts, strategy params
     latency_check   the startup self-check report
     obs             per tick: state age, camera frame id
-    infer_result    per inference: latency, start_timestep, splice info
+    infer_result    per inference: latency, start_timestep, splice info, and
+                    `actions` — the converted (H, 26) joint chunk, so
+                    replay_record.py can rebuild the buffers exactly
     action          per tick: the popped joint row, clamped or not
     clamp           when the clamp actually limited a step
     tracking        per chunk (relative_eef): worst IK tracking error
-    watchdog        strikes and trips, with reasons
-    estop           the damp() call
+    worker_error    the async inference worker died (with the exception)
+    estop           the damp() call, with the watchdog's reason
 
 ISOLATION contract: nothing here runs on, or blocks, a hot thread. `log()`
 builds a small dict and enqueues; one daemon writer drains to JSONL; a second
