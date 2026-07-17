@@ -83,19 +83,29 @@ class G1_29_ArmIK:
             reference_configuration=np.array([0.0] * self.robot.model.nq),
         )
 
+        # VENDOR PATCH (ego2g1): 5-arg Frame ctor (adds parent_frame index) —
+        # valid on pinocchio 2.7 through 4.x; the original 4-arg form only
+        # exists on >=3, and the numpy<2 lock resolves pin to 2.7.0.
+        _jid_L_ee = self.reduced_robot.model.getJointId("left_wrist_yaw_joint")
         self.reduced_robot.model.addFrame(
             pin.Frame(
                 "L_ee",
-                self.reduced_robot.model.getJointId("left_wrist_yaw_joint"),
+                _jid_L_ee,
+                self.reduced_robot.model.getFrameId("left_wrist_yaw_joint"),
                 pin.SE3(np.eye(3), np.array([0.05, 0, 0]).T),
                 pin.FrameType.OP_FRAME,
             )
         )
 
+        # VENDOR PATCH (ego2g1): 5-arg Frame ctor (adds parent_frame index) —
+        # valid on pinocchio 2.7 through 4.x; the original 4-arg form only
+        # exists on >=3, and the numpy<2 lock resolves pin to 2.7.0.
+        _jid_R_ee = self.reduced_robot.model.getJointId("right_wrist_yaw_joint")
         self.reduced_robot.model.addFrame(
             pin.Frame(
                 "R_ee",
-                self.reduced_robot.model.getJointId("right_wrist_yaw_joint"),
+                _jid_R_ee,
+                self.reduced_robot.model.getFrameId("right_wrist_yaw_joint"),
                 pin.SE3(np.eye(3), np.array([0.05, 0, 0]).T),
                 pin.FrameType.OP_FRAME,
             )
