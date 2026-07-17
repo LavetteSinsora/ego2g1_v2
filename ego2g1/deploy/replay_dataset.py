@@ -49,19 +49,45 @@ def load_episode(root: str, episode: int = 0) -> dict:
     """Read one episode's streams straight from the parquet (no lerobot import)."""
     import pandas as pd
 
-    files = sorted(pathlib.Path(root).glob("data/*/*.parquet"))
+    files = sorted(pathlib.Path(root).glob("data/*/*.parquet")) \
+        or sorted(pathlib.Path(root).glob("data/*.parquet"))
     if not files:
-        raise FileNotFoundError(f"no parquet under {root}/data/")
+        sibs = [d.name for d in pathlib.Path(root).parent.glob("*") if d.is_dir()]
+        raise FileNotFoundError(
+            f"no parquet under {root}/data/ — check the folder name; "
+            f"siblings here: {sibs}")
     f = files[min(episode, len(files) - 1)]
     df = pd.read_parquet(f)
-    return {
-        "name": f.name,
-        "arm": np.stack(df["arm_qpos"].to_numpy()).astype(np.float64),
-        "pose": {h: np.stack(df[f"pose.{h}"].to_numpy()).astype(np.float64)
-                 for h in layout.HANDS},
-        "hand": {h: np.stack(df[f"hand.{h}"].to_numpy()).astype(np.float64)
-                 for h in layout.HANDS},
-    }
+    if "arm_qpos" in df.columns:
+        return {
+            "name": f.name,
+            "arm": np.stack(df["arm_qpos"].to_numpy()).astype(np.float64),
+            "pose": {h: np.stack(df[f"pose.{h}"].to_numpy()).astype(np.float64)
+                     for h in layout.HANDS},
+            "hand": {h: np.stack(df[f"hand.{h}"].to_numpy()).astype(np.float64)
+                     for h in layout.HANDS},
+        }
+    if "observation.state" in df.columns:
+        # ZH / unitree-teleop joint-space schema: a 26-D vector per frame,
+        # ASSUMED [arm14 (L7|R7) | hand12 (L6|R6)] — the same unverified
+        # ordering assumption zh_ego2g1_bridge documents (its ARM_PERM hook).
+        # We replay the MEASURED state (physically smooth by construction),
+        # which makes such a dataset the perfect executor control: if this
+        # judders, the executor/machine is at fault, not the targets.
+        state = np.stack(df["observation.state"].to_numpy()).astype(np.float64)
+        if state.shape[1] < 26:
+            raise ValueError(f"observation.state is {state.shape[1]}-D, expected >=26")
+        logger.warning("joint-space dataset (%s): using observation.state, "
+                       "assuming [arm14|handL6|handR6] order — verify with a "
+                       "single-joint sanity wiggle before a full replay", f.name)
+        return {
+            "name": f.name,
+            "arm": state[:, :14],
+            "pose": None,                      # no EEF labels; --from-eef unavailable
+            "hand": {"left": state[:, 14:20], "right": state[:, 20:26]},
+        }
+    raise ValueError(
+        f"unrecognized dataset schema in {f.name}; columns: {list(df.columns)}")
 
 
 def accel_rms(q: np.ndarray, fps: float) -> np.ndarray:
@@ -118,6 +144,8 @@ class Args:
 
 def main(args: Args) -> None:
     ep = load_episode(args.dataset, args.episode)
+    if args.from_eef and ep["pose"] is None:
+        raise SystemExit("--from-eef needs pose columns; this dataset is joint-space only")
     if args.from_eef:
         arm = solve_from_eef(ep, args.fps, ik_iters=args.ik_iters,
                              tol_m=args.ik_tol)

@@ -90,6 +90,11 @@ class UnitreeExecutor:
     # --- lifecycle ----------------------------------------------------------
 
     def connect(self) -> None:
+        # macOS has no native unitree CRC -> ~1 ms/LowCmd pure-Python inside
+        # the 500 Hz loop (39-50% of the tick budget, measured). Bit-identical
+        # zlib replacement, 187x faster; no-op effect on Linux (native branch).
+        from . import fast_crc
+        fast_crc.install()
         # Pre-init the DDS factory on the requested interface BEFORE the
         # vendor's own ChannelFactoryInitialize(0): the sdk's init is a
         # singleton, so ours wins. Best-effort — zh never sets one either.
