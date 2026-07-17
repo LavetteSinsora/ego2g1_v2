@@ -12,7 +12,10 @@ description = "Egocentric human recordings -> pi0.5 -> Unitree G1-D: data, train
 requires-python = ">=3.11,<3.13"
 dependencies = [
     # core + kin + data — the set every role needs
-    "numpy>=2,<3",
+    # numpy stays under 2.0: openpi pins <2.0.0 and the PPU training stack is
+    # proven there; one consistent resolution beats two numpy worlds. (The old
+    # dev venv ran 2.4.6 — the code is compatible with both.)
+    "numpy>=1.22.4,<2",
     "scipy",
     "h5py",
     "pillow",
@@ -45,15 +48,22 @@ deploy = [
     "casadi",   # only unitree_deploy's own IK path; we use mink
     "opencv-python",
     "pyzmq",    # robot image_server client
+    "torch",    # unitree_deploy's send_action takes tensors
+    "pyarrow",  # replay_dataset reads LeRobot parquet directly
+    "tyro",
+    "openpi-client",
 ]
 teleop = [
-    "vuer",
+    # televuer is vendored from xr_teleoperate/teleop/televuer (212 KB — the
+    # only part of that repo we actually depend on); it brings vuer at its pin
     "televuer",
 ]
 dev = ["pytest"]
 
 [tool.uv.sources]
 openpi = { path = "third_party/openpi", editable = true }
+televuer = { path = "third_party/televuer", editable = true }
+openpi-client = { path = "third_party/openpi/packages/openpi-client", editable = true }
 unitree_deploy = { path = "third_party/unitree_deploy", editable = true }
 
 [build-system]
