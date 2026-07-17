@@ -124,6 +124,7 @@ class RelativeEEFChunks:
         kw = one_euro_kwargs or {}
         self._smoother = {h: OneEuroSE3(**kw) for h in layout.HANDS}
         self.last_tracking_error: float = 0.0
+        self.last_slot_errors = np.zeros(0)
 
     def convert(self, actions, arm_q14, hand_cmds: dict) -> np.ndarray:
         actions = np.asarray(actions, dtype=np.float64)
@@ -137,17 +138,22 @@ class RelativeEEFChunks:
         self.kin.ground(arm_q14)
 
         out = np.empty((len(actions), ROBOT_DIM), dtype=np.float64)
-        worst = 0.0
+        slot_err = np.zeros(len(actions))
         for k, row in enumerate(actions):
             targets = {}
             for h in layout.HANDS:
                 T = se3.compose(anchor[h], row[layout.EEF[h]])
                 targets[h] = self._smoother[h].filter(T, self.dt)
             out[k, ARM] = self.kin.solve(targets)
-            worst = max(worst, max(self.kin.tracking_error(targets).values()))
+            slot_err[k] = max(self.kin.tracking_error(targets).values())
             for h in layout.HANDS:
                 out[k, HAND[h]] = np.clip(row[layout.HAND[h]], 0.0, 1.0)
-        self.last_tracking_error = worst
+        # per-slot residual PROFILE, not just the max: a residual that grows
+        # with slot index means inflated deltas (e.g. per-slot rescale missing
+        # server-side); a flat offset from slot 0 means an anchor/frame bug
+        # (the 138 mm E-STOP of 2026-07-17 was diagnosed blind for lack of it)
+        self.last_slot_errors = slot_err
+        self.last_tracking_error = float(slot_err.max()) if len(slot_err) else 0.0
         return out
 
     def reset(self) -> None:

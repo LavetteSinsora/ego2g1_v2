@@ -47,6 +47,19 @@ class Policy(Protocol):
     def infer(self, observation: dict) -> dict: ...
 
 
+def _diag_fields(result: dict) -> dict:
+    """Serve-side diagnosis fields the adapter attaches (relative_eef mode):
+    the raw model-space chunk, the request state, and the per-slot IK residual
+    profile. Logged with every infer_result so a bad served chunk is fully
+    diagnosable from the recording alone (the 138 mm E-STOP lesson)."""
+    out = {}
+    for k in ("raw_chunk", "request_state", "slot_errors_m"):
+        v = result.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def _extract_actions(result: dict) -> np.ndarray:
     if not isinstance(result, dict) or "actions" not in result:
         raise ValueError("Policy response must contain an 'actions' field")
@@ -74,7 +87,8 @@ class SynchronousStrategy:
     def update_observation(self, observation: dict) -> None:
         if self._chunk is None or self._index >= min(self._chunk_size, len(self._chunk)):
             t0 = time.monotonic()
-            self._chunk = _extract_actions(self._policy.infer(observation))
+            result = self._policy.infer(observation)
+            self._chunk = _extract_actions(result)
             elapsed = time.monotonic() - t0                      # [ego2g1]
             if self._budget is not None:
                 self._budget.observe(elapsed)
@@ -83,7 +97,7 @@ class SynchronousStrategy:
                 # (replay_record.py); ~H*26 floats once per chunk.
                 self._recorder.log("infer_result", latency=elapsed,
                                    horizon=len(self._chunk), mode="sync",
-                                   actions=self._chunk)
+                                   actions=self._chunk, **_diag_fields(result))
             self._index = 0
 
     def has_action(self) -> bool:
@@ -423,7 +437,8 @@ class AsyncStrategy:
                         request["prev_action_chunk"] = self._previous_chunk
 
                 start_time = time.monotonic()
-                actions = _extract_actions(self._policy.infer(request))
+                result = self._policy.infer(request)
+                actions = _extract_actions(result)
                 elapsed = time.monotonic() - start_time
                 if self._rtc:
                     self._delays.append(elapsed)
@@ -437,7 +452,8 @@ class AsyncStrategy:
                     self._recorder.log("infer_result", latency=elapsed,
                                        start_timestep=start_timestep,
                                        horizon=len(actions), rtc=self._rtc,
-                                       splice=info, actions=actions)
+                                       splice=info, actions=actions,
+                                       **_diag_fields(result))
 
                 with self._condition:
                     deadline = start_time + self._period

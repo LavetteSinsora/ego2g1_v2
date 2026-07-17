@@ -119,7 +119,14 @@ class RelativeEEFPolicyAdapter:
         out = self._client.infer(request.get("image"), state,
                                  request.get("prompt", self.prompt),
                                  prev_chunk=prev, d=d, n_prefix=n_prefix)
+        # keep the raw model-space chunk + the request state for the recorder:
+        # without them a bad served chunk is undiagnosable from the recording
+        self.last_state = np.asarray(state, dtype=np.float64)
+        self.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
         out["actions"] = self._converter.convert(out["actions"], arm_q, hand_cmds)
+        out["slot_errors_m"] = getattr(self._converter, "last_slot_errors", None)
+        out["raw_chunk"] = self.last_raw_chunk
+        out["request_state"] = self.last_state
         return out
 
     def _reanchor_joint_rows(self, rows, arm_q_new) -> tuple[np.ndarray, int]:
