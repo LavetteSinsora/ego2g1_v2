@@ -42,9 +42,14 @@ def test_vendor_tree_is_complete():
             / "g1_body29_hand14.urdf").exists()
     # installs as a path dep
     assert (VENDOR / "pyproject.toml").exists()
-    # build junk must NOT have been vendored
-    assert not (VENDOR / "unitree_deploy.egg-info").exists()
-    assert not list(VENDOR.rglob("__pycache__"))
+    # build junk must not be TRACKED — an editable `uv sync` legitimately
+    # regenerates egg-info/__pycache__ on disk; .gitignore keeps them out
+    import subprocess
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "third_party/unitree_deploy/unitree_deploy.egg-info",
+         "third_party/unitree_deploy/**/__pycache__"],
+        capture_output=True, text=True, cwd=VENDOR.parent.parent).stdout.strip()
+    assert not tracked, f"build junk is committed: {tracked}"
 
 
 def test_arm_configs_are_312_safe_and_unshared():
