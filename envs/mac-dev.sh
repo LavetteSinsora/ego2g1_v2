@@ -32,3 +32,7 @@ cd "$_EGO2G1_ROOT"
 
 echo "mac-dev: venv=$_EGO2G1_ROOT/.venv  ffmpeg=$(command -v ffmpeg || echo MISSING)"
 echo "mac-dev: interactive MuJoCo viewers -> use mjpython, not python"
+
+# CycloneDDS C library for building cyclonedds / unitree_sdk2py (deploy group):
+# built from source once (docs/deps-deploy.md); the sdist build needs this var.
+[ -d "$HOME/cyclonedds/install" ] && export CYCLONEDDS_HOME="$HOME/cyclonedds/install"

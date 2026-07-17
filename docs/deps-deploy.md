@@ -76,3 +76,23 @@ draccus, logging_mp  # unitree_deploy internals
 | robot subnet | 192.168.123.x, deploy box on-subnet | docs/deploy.md |
 | head camera host | 192.168.123.164 | `--camera-host` (runner, check camera) |
 | policy server | 127.0.0.1:8000 | `--host/--port` |
+
+## CycloneDDS on macOS
+
+`unitree_sdk2py` needs `cyclonedds==0.10.2`, which has no macOS wheel — it
+builds against the CycloneDDS C library. This machine has it built from
+source at `~/cyclonedds/install` (C lib 0.10.2, matching the binding pin):
+
+```bash
+CYCLONEDDS_HOME="$HOME/cyclonedds/install" uv sync --group deploy
+```
+
+A fresh Mac needs that one-time build first:
+
+```bash
+git clone -b releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds ~/cyclonedds
+cmake -B ~/cyclonedds/build -S ~/cyclonedds -DCMAKE_INSTALL_PREFIX=~/cyclonedds/install
+cmake --build ~/cyclonedds/build --target install
+```
+
+The built wheel keeps an rpath to that install dir — don't delete it.
