@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import json
 import pathlib
 import time
 
@@ -68,13 +69,29 @@ def load_episode(root: str, episode: int = 0) -> dict:
                      for h in layout.HANDS},
         }
     if "observation.state" in df.columns:
-        # ZH / unitree-teleop joint-space schema: a 26-D vector per frame,
-        # ASSUMED [arm14 (L7|R7) | hand12 (L6|R6)] — the same unverified
-        # ordering assumption zh_ego2g1_bridge documents (its ARM_PERM hook).
-        # We replay the MEASURED state (physically smooth by construction),
-        # which makes such a dataset the perfect executor control: if this
-        # judders, the executor/machine is at fault, not the targets.
+        # Foreign schema: NEVER guess the layout from the shape — read the
+        # feature names the dataset itself declares. (A ZH "EEF30" dataset is
+        # 30-D of [wrist pose 9|9 | hand 12]; slicing that as joints would
+        # drive pose numbers into the motors.)
+        names = []
+        meta = pathlib.Path(root) / "meta" / "info.json"
+        if meta.exists():
+            feat = json.loads(meta.read_text())["features"].get("observation.state", {})
+            n = feat.get("names") or []
+            names = list(n[0]) if n and isinstance(n[0], (list, tuple)) else list(n)
+        if any("Wrist" in str(x) for x in names):
+            raise SystemExit(
+                f"{f.name} is an EEF-pose dataset ({names[:3]}...) in ZH's frame "
+                "conventions — not directly replayable as joints, and our IK "
+                "does not share their wrist frame. Use a joint-space dataset "
+                "(names like kLeftShoulderPitch) or this repo's own datasets.")
         state = np.stack(df["observation.state"].to_numpy()).astype(np.float64)
+        joint_like = names and all(("Wrist" not in str(x)) for x in names) and \
+            any(("Shoulder" in str(x) or "Elbow" in str(x)) for x in names)
+        if not joint_like:
+            raise SystemExit(
+                f"cannot establish that {f.name} is joint-space "
+                f"(names: {names[:6] or 'MISSING'}); refusing to guess.")
         if state.shape[1] < 26:
             raise ValueError(f"observation.state is {state.shape[1]}-D, expected >=26")
         logger.warning("joint-space dataset (%s): using observation.state, "
