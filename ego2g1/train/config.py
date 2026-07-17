@@ -32,7 +32,11 @@ class Ego2G1TrainConfig:
     # their stats under the unsuffixed name; new-repo checkpoints start fresh on
     # the policy-compliant _ego name (docs/datasets.md)
     repo_id: str = "ego2g1/put_bottle_in_box_ego"
-    expected_config_hash: str | None = None # hash of the data_extraction config expected to use. copy that directly from the dataset you inspected and want to use (extraction_meta.json)
+    # extraction config hash this training run expects (from the dataset's
+    # extraction_meta.json). 7b7f8bb7… = the 2026-07-17 full re-extraction with
+    # s004c_resolve smooth proprioception (102 sub-episodes, 16464 frames;
+    # joint accel RMS median 29.9 -> 6.1 rad/s^2).
+    expected_config_hash: str | None = "7b7f8bb70e3e7f1c"
     fps: int = 30 # data's corresponding frequency (how many actions correspond to 1 second of expected execution)
     hands: tuple[str, ...] = ("left", "right") # order of hand in action label (i.e., which hand occupies the first 15-dim of the action)
     val_real_episodes: tuple[str, ...] = (
