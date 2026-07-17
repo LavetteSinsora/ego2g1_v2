@@ -1,0 +1,916 @@
+{
+  "files": [
+    {
+      "dst_sha": "6504efe686fc7de87e7f8ec2dd45b3e0cf99bd228993a4ee57d66e85d7d1d7cf",
+      "source": "data_extraction/common/frames.py",
+      "src_sha": "6504efe686fc7de87e7f8ec2dd45b3e0cf99bd228993a4ee57d66e85d7d1d7cf",
+      "vendor": "de/common/frames.py"
+    },
+    {
+      "dst_sha": "30ce1f241b7ad025b426dd907c12349c0befe9f65ec86ddfe2b74d1ae0f624dd",
+      "source": "data_extraction/common/episode.py",
+      "src_sha": "30ce1f241b7ad025b426dd907c12349c0befe9f65ec86ddfe2b74d1ae0f624dd",
+      "vendor": "de/common/episode.py"
+    },
+    {
+      "dst_sha": "e335f1b8cfed5c37a7bad7691d1da6c1cae8eb1b1bf2278ae3d38d6ccc23720d",
+      "source": "data_extraction/hand/constants.py",
+      "src_sha": "e335f1b8cfed5c37a7bad7691d1da6c1cae8eb1b1bf2278ae3d38d6ccc23720d",
+      "vendor": "de/hand/constants.py"
+    },
+    {
+      "dst_sha": "a553f893fce8b83165c6945d10886737e8c666630b4d7f6cf8170449501caa4d",
+      "source": "data_extraction/hand/fk_tables.py",
+      "src_sha": "a553f893fce8b83165c6945d10886737e8c666630b4d7f6cf8170449501caa4d",
+      "vendor": "de/hand/fk_tables.py"
+    },
+    {
+      "dst_sha": "47681bd67960bfdb984e9d5ff10188ba46c1609d8069a402948480f56e5414a8",
+      "source": "data_extraction/hand/retarget.py",
+      "src_sha": "47681bd67960bfdb984e9d5ff10188ba46c1609d8069a402948480f56e5414a8",
+      "vendor": "de/hand/retarget.py"
+    },
+    {
+      "dst_sha": "5598294d208a394980d0557adbadb756512223dedfb2984e2b70f5ecd41d723a",
+      "source": "data_extraction/assets/revo2/fk_tables_left.npz",
+      "src_sha": "5598294d208a394980d0557adbadb756512223dedfb2984e2b70f5ecd41d723a",
+      "vendor": "de/assets/revo2/fk_tables_left.npz"
+    },
+    {
+      "dst_sha": "7d34ab8fc898f7d29379caaa3007a3c1765a563d3b257be371559e827b3c40a2",
+      "source": "data_extraction/assets/revo2/fk_tables_right.npz",
+      "src_sha": "7d34ab8fc898f7d29379caaa3007a3c1765a563d3b257be371559e827b3c40a2",
+      "vendor": "de/assets/revo2/fk_tables_right.npz"
+    },
+    {
+      "dst_sha": "2c61af7f717d4c1e8b2ff91d0727f93e231a4f930014aead550eb1680d9db57d",
+      "source": "data_extraction/assets/revo2/xml_left/brainco-lefthand-v2-patched-free.xml",
+      "src_sha": "2c61af7f717d4c1e8b2ff91d0727f93e231a4f930014aead550eb1680d9db57d",
+      "vendor": "de/assets/revo2/xml_left/brainco-lefthand-v2-patched-free.xml"
+    },
+    {
+      "dst_sha": "b350918918ba6dc9cbcd2e08ae034c40a5c9a515013d78bb167cc0b8b251c2c1",
+      "source": "data_extraction/assets/revo2/xml_left/brainco-lefthand-v2-patched.xml",
+      "src_sha": "b350918918ba6dc9cbcd2e08ae034c40a5c9a515013d78bb167cc0b8b251c2c1",
+      "vendor": "de/assets/revo2/xml_left/brainco-lefthand-v2-patched.xml"
+    },
+    {
+      "dst_sha": "0d3c66411e7227ea91ca4468681fcdeaae15ff056805fe44183a4a7d64e1a788",
+      "source": "data_extraction/assets/revo2/xml_left/brainco-lefthand-v2.xml",
+      "src_sha": "0d3c66411e7227ea91ca4468681fcdeaae15ff056805fe44183a4a7d64e1a788",
+      "vendor": "de/assets/revo2/xml_left/brainco-lefthand-v2.xml"
+    },
+    {
+      "dst_sha": "340401f796bbac762cf85d53e6db4be02cce2f06b66fcf8d6ecb5ba883f06afd",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_base_link.STL",
+      "src_sha": "340401f796bbac762cf85d53e6db4be02cce2f06b66fcf8d6ecb5ba883f06afd",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_base_link.STL"
+    },
+    {
+      "dst_sha": "d9d2558da8369d2f0993e46eed3d1e2a11b4927ab2b8c1731d460b72fea04e9e",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_base_visual_link.STL",
+      "src_sha": "d9d2558da8369d2f0993e46eed3d1e2a11b4927ab2b8c1731d460b72fea04e9e",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_base_visual_link.STL"
+    },
+    {
+      "dst_sha": "634d5c569628c3c2dbc92932065748ed830fb17ccf933959a5834b2759ab8acd",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_index_distal_link.STL",
+      "src_sha": "634d5c569628c3c2dbc92932065748ed830fb17ccf933959a5834b2759ab8acd",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_index_distal_link.STL"
+    },
+    {
+      "dst_sha": "1fed32c1a8451282b314579eed3903a288a62524dc7d8b08464fb559261bb580",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_index_proximal_link.STL",
+      "src_sha": "1fed32c1a8451282b314579eed3903a288a62524dc7d8b08464fb559261bb580",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_index_proximal_link.STL"
+    },
+    {
+      "dst_sha": "9f5a11d72375073e8373a02ce604ca99abcb583074ba2f520510b48abc4c5b86",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_index_tip.STL",
+      "src_sha": "9f5a11d72375073e8373a02ce604ca99abcb583074ba2f520510b48abc4c5b86",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_index_tip.STL"
+    },
+    {
+      "dst_sha": "9f5a11d72375073e8373a02ce604ca99abcb583074ba2f520510b48abc4c5b86",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_index_tip_link.STL",
+      "src_sha": "9f5a11d72375073e8373a02ce604ca99abcb583074ba2f520510b48abc4c5b86",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_index_tip_link.STL"
+    },
+    {
+      "dst_sha": "821249c18a0cf66c87aa4029de1f0ce532f03e7a173c951a5121f2df3b301b52",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_index_touch_link.STL",
+      "src_sha": "821249c18a0cf66c87aa4029de1f0ce532f03e7a173c951a5121f2df3b301b52",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_index_touch_link.STL"
+    },
+    {
+      "dst_sha": "e0ff6f648bbb7712bbc7f06bacdd3a574cac2e1bc2398383b57da2d76c88932a",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_middle_distal_link.STL",
+      "src_sha": "e0ff6f648bbb7712bbc7f06bacdd3a574cac2e1bc2398383b57da2d76c88932a",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_middle_distal_link.STL"
+    },
+    {
+      "dst_sha": "50122ebf6e75698ba2c469efd58e07ad3f82b1a002728cd15802f1c435d54c0c",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_middle_proximal_link.STL",
+      "src_sha": "50122ebf6e75698ba2c469efd58e07ad3f82b1a002728cd15802f1c435d54c0c",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_middle_proximal_link.STL"
+    },
+    {
+      "dst_sha": "ef4ac885d12e603918722c22000a59827f168f276d9c41651ef0d94175113486",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_middle_tip.STL",
+      "src_sha": "ef4ac885d12e603918722c22000a59827f168f276d9c41651ef0d94175113486",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_middle_tip.STL"
+    },
+    {
+      "dst_sha": "ef4ac885d12e603918722c22000a59827f168f276d9c41651ef0d94175113486",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_middle_tip_link.STL",
+      "src_sha": "ef4ac885d12e603918722c22000a59827f168f276d9c41651ef0d94175113486",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_middle_tip_link.STL"
+    },
+    {
+      "dst_sha": "c91b30341a816ac079ec1268c8427ca3a010356002a30b6847b2853a0edf1e6b",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_middle_touch_link.STL",
+      "src_sha": "c91b30341a816ac079ec1268c8427ca3a010356002a30b6847b2853a0edf1e6b",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_middle_touch_link.STL"
+    },
+    {
+      "dst_sha": "d52822897dcc0de60fff7f2652a7d12a342b47905eff7555eaabcc1bcfcaeac4",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_pinky_distal_link.STL",
+      "src_sha": "d52822897dcc0de60fff7f2652a7d12a342b47905eff7555eaabcc1bcfcaeac4",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_pinky_distal_link.STL"
+    },
+    {
+      "dst_sha": "9f1408568638fbbec4cf32507d4b233fbd8cdb9c862e07cc7da6cd826497caa6",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_pinky_proximal_link.STL",
+      "src_sha": "9f1408568638fbbec4cf32507d4b233fbd8cdb9c862e07cc7da6cd826497caa6",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_pinky_proximal_link.STL"
+    },
+    {
+      "dst_sha": "56eae1cc71cf6acab0a20c1a8e2e470c9ec96f520386c1ea22f10f51e2dbf758",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_pinky_tip.STL",
+      "src_sha": "56eae1cc71cf6acab0a20c1a8e2e470c9ec96f520386c1ea22f10f51e2dbf758",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_pinky_tip.STL"
+    },
+    {
+      "dst_sha": "56eae1cc71cf6acab0a20c1a8e2e470c9ec96f520386c1ea22f10f51e2dbf758",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_pinky_tip_link.STL",
+      "src_sha": "56eae1cc71cf6acab0a20c1a8e2e470c9ec96f520386c1ea22f10f51e2dbf758",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_pinky_tip_link.STL"
+    },
+    {
+      "dst_sha": "850ad4ad9daf4188aa17f96588fe5541fb0c70be10d714930b3cb816748258a0",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_pinky_touch_link.STL",
+      "src_sha": "850ad4ad9daf4188aa17f96588fe5541fb0c70be10d714930b3cb816748258a0",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_pinky_touch_link.STL"
+    },
+    {
+      "dst_sha": "c59b62ef04c9cb436f6a6bac5ae9be985eca0d538bc58380c40c00d16079d580",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_ring_distal_link.STL",
+      "src_sha": "c59b62ef04c9cb436f6a6bac5ae9be985eca0d538bc58380c40c00d16079d580",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_ring_distal_link.STL"
+    },
+    {
+      "dst_sha": "77220c07d5bbc119cb828af89f35cb4cef755bbc98a1cae2dda846268ff59501",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_ring_proximal_link.STL",
+      "src_sha": "77220c07d5bbc119cb828af89f35cb4cef755bbc98a1cae2dda846268ff59501",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_ring_proximal_link.STL"
+    },
+    {
+      "dst_sha": "870a5b7890a41c8fb8e91cd0c4f74f01c64778bf33f29c135b0b0431a489cde1",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_ring_tip.STL",
+      "src_sha": "870a5b7890a41c8fb8e91cd0c4f74f01c64778bf33f29c135b0b0431a489cde1",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_ring_tip.STL"
+    },
+    {
+      "dst_sha": "870a5b7890a41c8fb8e91cd0c4f74f01c64778bf33f29c135b0b0431a489cde1",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_ring_tip_link.STL",
+      "src_sha": "870a5b7890a41c8fb8e91cd0c4f74f01c64778bf33f29c135b0b0431a489cde1",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_ring_tip_link.STL"
+    },
+    {
+      "dst_sha": "c2fb7d2c4fb0df91209ab7158d5f17ab59a7aa56522a9e91a3c3884a35ac6ae0",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_ring_touch_link.STL",
+      "src_sha": "c2fb7d2c4fb0df91209ab7158d5f17ab59a7aa56522a9e91a3c3884a35ac6ae0",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_ring_touch_link.STL"
+    },
+    {
+      "dst_sha": "99300669452dc8e34d5f62caf31c9c769077af45e0127511cd0c56967fe691a6",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_distal_link.STL",
+      "src_sha": "99300669452dc8e34d5f62caf31c9c769077af45e0127511cd0c56967fe691a6",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_distal_link.STL"
+    },
+    {
+      "dst_sha": "415a75193e7773572b0df8a80fa4e1d187a67901a5ff381a89ee5b7df64735ea",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_metacarpal_link.STL",
+      "src_sha": "415a75193e7773572b0df8a80fa4e1d187a67901a5ff381a89ee5b7df64735ea",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_metacarpal_link.STL"
+    },
+    {
+      "dst_sha": "ccffe779ed683ec5c2f24e3776c11a127e341743142ddd8f275bfded76938da8",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_proximal_link.STL",
+      "src_sha": "ccffe779ed683ec5c2f24e3776c11a127e341743142ddd8f275bfded76938da8",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_proximal_link.STL"
+    },
+    {
+      "dst_sha": "bcd5279fb8a4d8ba4b06b3d302caa567fde9add81b057943cc6a445abb9e27b5",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_proximal_visual_link.STL",
+      "src_sha": "bcd5279fb8a4d8ba4b06b3d302caa567fde9add81b057943cc6a445abb9e27b5",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_proximal_visual_link.STL"
+    },
+    {
+      "dst_sha": "5177296e2426d118cc15ca74db26ebbdedf129f7a2b7c1194b2752f19e1fa3cd",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_tip.STL",
+      "src_sha": "5177296e2426d118cc15ca74db26ebbdedf129f7a2b7c1194b2752f19e1fa3cd",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_tip.STL"
+    },
+    {
+      "dst_sha": "acb6f2d6820d17a22eeb4a02cfc26c8b8fab0ddfdcda8d4d4ef65929275687c5",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_tip_link.STL",
+      "src_sha": "acb6f2d6820d17a22eeb4a02cfc26c8b8fab0ddfdcda8d4d4ef65929275687c5",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_tip_link.STL"
+    },
+    {
+      "dst_sha": "e31a6aa8faf2be8a6bfc3f222ebe7cf59fb5266487d1d98b86a55a7a2524fc20",
+      "source": "data_extraction/assets/revo2/xml_left/meshes/left_thumb_touch_link.STL",
+      "src_sha": "e31a6aa8faf2be8a6bfc3f222ebe7cf59fb5266487d1d98b86a55a7a2524fc20",
+      "vendor": "de/assets/revo2/xml_left/meshes/left_thumb_touch_link.STL"
+    },
+    {
+      "dst_sha": "ce57c126f784cbca3df6ce40b85ef58be9ff55f2b8bd809af917499d199a3eee",
+      "source": "data_extraction/assets/revo2/xml_left/scene_left.xml",
+      "src_sha": "ce57c126f784cbca3df6ce40b85ef58be9ff55f2b8bd809af917499d199a3eee",
+      "vendor": "de/assets/revo2/xml_left/scene_left.xml"
+    },
+    {
+      "dst_sha": "b014f26c62532ab4a472c590f32394f02a226940c207a1184d96710a7e174849",
+      "source": "data_extraction/assets/revo2/xml_right/brainco-righthand-v2-patched-free.xml",
+      "src_sha": "b014f26c62532ab4a472c590f32394f02a226940c207a1184d96710a7e174849",
+      "vendor": "de/assets/revo2/xml_right/brainco-righthand-v2-patched-free.xml"
+    },
+    {
+      "dst_sha": "6a397dbdc69466044ca6d2f14ec31c19ff40638b846e5e9f64d6f8a2adcfdb42",
+      "source": "data_extraction/assets/revo2/xml_right/brainco-righthand-v2-patched.xml",
+      "src_sha": "6a397dbdc69466044ca6d2f14ec31c19ff40638b846e5e9f64d6f8a2adcfdb42",
+      "vendor": "de/assets/revo2/xml_right/brainco-righthand-v2-patched.xml"
+    },
+    {
+      "dst_sha": "425f6870d58d44ae7ac6ae2075c962f6ca445004af80815732db047b7e219d10",
+      "source": "data_extraction/assets/revo2/xml_right/brainco-righthand-v2.xml",
+      "src_sha": "425f6870d58d44ae7ac6ae2075c962f6ca445004af80815732db047b7e219d10",
+      "vendor": "de/assets/revo2/xml_right/brainco-righthand-v2.xml"
+    },
+    {
+      "dst_sha": "cab60b1d90f964f4fdb89e55809e5aae844ab3b7f585babc6aa232b080e2b445",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/base_link.STL",
+      "src_sha": "cab60b1d90f964f4fdb89e55809e5aae844ab3b7f585babc6aa232b080e2b445",
+      "vendor": "de/assets/revo2/xml_right/meshes/base_link.STL"
+    },
+    {
+      "dst_sha": "14756351009a3a6be8916068d67ff8b1ac0ed046ace47ceebe28ed8a8f2d7995",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link1.STL",
+      "src_sha": "14756351009a3a6be8916068d67ff8b1ac0ed046ace47ceebe28ed8a8f2d7995",
+      "vendor": "de/assets/revo2/xml_right/meshes/link1.STL"
+    },
+    {
+      "dst_sha": "fe6457ac59723c6e35e0c12c809c171d21b9165bf2f1782ddc8998c492706383",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link2.STL",
+      "src_sha": "fe6457ac59723c6e35e0c12c809c171d21b9165bf2f1782ddc8998c492706383",
+      "vendor": "de/assets/revo2/xml_right/meshes/link2.STL"
+    },
+    {
+      "dst_sha": "caa28db987ecec82f4b5584f53c0a4c10460177912bef8bdc70dff6f7e8e9219",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link3.STL",
+      "src_sha": "caa28db987ecec82f4b5584f53c0a4c10460177912bef8bdc70dff6f7e8e9219",
+      "vendor": "de/assets/revo2/xml_right/meshes/link3.STL"
+    },
+    {
+      "dst_sha": "7fc66e41318399ee534fbfc59fd49b830a36ece4a558de133f31a7644bac0580",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link4.STL",
+      "src_sha": "7fc66e41318399ee534fbfc59fd49b830a36ece4a558de133f31a7644bac0580",
+      "vendor": "de/assets/revo2/xml_right/meshes/link4.STL"
+    },
+    {
+      "dst_sha": "482832743269f83b98599dfbb3b3fb59c876df6ba61b7954c9a1e2928996d219",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link5.STL",
+      "src_sha": "482832743269f83b98599dfbb3b3fb59c876df6ba61b7954c9a1e2928996d219",
+      "vendor": "de/assets/revo2/xml_right/meshes/link5.STL"
+    },
+    {
+      "dst_sha": "e1334db72ddbf360c16309350b76b5190b255c55cda24fcb6c8fadfa7f84474b",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/link6.STL",
+      "src_sha": "e1334db72ddbf360c16309350b76b5190b255c55cda24fcb6c8fadfa7f84474b",
+      "vendor": "de/assets/revo2/xml_right/meshes/link6.STL"
+    },
+    {
+      "dst_sha": "194a0bb5962116c564c68877eb4be363f7f5b96e497c55b56ae91878199410b3",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_base_link.STL",
+      "src_sha": "194a0bb5962116c564c68877eb4be363f7f5b96e497c55b56ae91878199410b3",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_base_link.STL"
+    },
+    {
+      "dst_sha": "2754b59a9132a04a28cf5725d5478599218c9f7dd4b2e13329147e824211ec44",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_base_link_collision.STL",
+      "src_sha": "2754b59a9132a04a28cf5725d5478599218c9f7dd4b2e13329147e824211ec44",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_base_link_collision.STL"
+    },
+    {
+      "dst_sha": "44d4b12f55e85baf77685443aa1f38ae521130a58f0b742920f2a99abc1a1efb",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_index_distal_link.STL",
+      "src_sha": "44d4b12f55e85baf77685443aa1f38ae521130a58f0b742920f2a99abc1a1efb",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_index_distal_link.STL"
+    },
+    {
+      "dst_sha": "94fdff414f1c29940495d1f0264a50621340cfc30f9b5365b3490d39ae367f2f",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_index_proximal_link.STL",
+      "src_sha": "94fdff414f1c29940495d1f0264a50621340cfc30f9b5365b3490d39ae367f2f",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_index_proximal_link.STL"
+    },
+    {
+      "dst_sha": "4af36131feedb7f83a695ff8e7d09a7e8893df96f971b2d363c0d359e3a82bbf",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_index_tip.STL",
+      "src_sha": "4af36131feedb7f83a695ff8e7d09a7e8893df96f971b2d363c0d359e3a82bbf",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_index_tip.STL"
+    },
+    {
+      "dst_sha": "7914a8c479cf6490151f32a7d2515b6965b53c26aee535f1a65f59e3b4fc109f",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_index_touch_link.STL",
+      "src_sha": "7914a8c479cf6490151f32a7d2515b6965b53c26aee535f1a65f59e3b4fc109f",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_index_touch_link.STL"
+    },
+    {
+      "dst_sha": "8f11ee9addab1a1eab40fd765c21389e6f98397166ae5899dc83ddf66f871b3b",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_middle_distal_link.STL",
+      "src_sha": "8f11ee9addab1a1eab40fd765c21389e6f98397166ae5899dc83ddf66f871b3b",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_middle_distal_link.STL"
+    },
+    {
+      "dst_sha": "56d9f019bad093daf93a736596ab4e7d9b17fb3c79e2be4181d909958cf76a37",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_middle_proximal_link.STL",
+      "src_sha": "56d9f019bad093daf93a736596ab4e7d9b17fb3c79e2be4181d909958cf76a37",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_middle_proximal_link.STL"
+    },
+    {
+      "dst_sha": "844204b7bcf3de3ad500232e2e30ac15a8ec41728be281d0670c7ad1a2b09e34",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_middle_tip.STL",
+      "src_sha": "844204b7bcf3de3ad500232e2e30ac15a8ec41728be281d0670c7ad1a2b09e34",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_middle_tip.STL"
+    },
+    {
+      "dst_sha": "f323fadd04201cef29408d14bb58e27780d0343f80b2b1378f629c2fb3378838",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_middle_touch_link.STL",
+      "src_sha": "f323fadd04201cef29408d14bb58e27780d0343f80b2b1378f629c2fb3378838",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_middle_touch_link.STL"
+    },
+    {
+      "dst_sha": "14c25fb57059978594ea518860522ae401e3a3602d6a39297c52807620e30bac",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_pinky_distal_link.STL",
+      "src_sha": "14c25fb57059978594ea518860522ae401e3a3602d6a39297c52807620e30bac",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_pinky_distal_link.STL"
+    },
+    {
+      "dst_sha": "1a4ba525880efd4da2bcdfd5d2d69a684a02f8c7c01f8e185adf23f47469d0f4",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_pinky_proximal_link.STL",
+      "src_sha": "1a4ba525880efd4da2bcdfd5d2d69a684a02f8c7c01f8e185adf23f47469d0f4",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_pinky_proximal_link.STL"
+    },
+    {
+      "dst_sha": "f632c67971d2d6dc8a5edcfcac4db8b3078e346540270bd89a9e9c783d304415",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_pinky_tip.STL",
+      "src_sha": "f632c67971d2d6dc8a5edcfcac4db8b3078e346540270bd89a9e9c783d304415",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_pinky_tip.STL"
+    },
+    {
+      "dst_sha": "28dc7fbaee79ca713ef2d18ef1861ea21d717e872c3de9d658fd5061472b4bc1",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_pinky_touch_link.STL",
+      "src_sha": "28dc7fbaee79ca713ef2d18ef1861ea21d717e872c3de9d658fd5061472b4bc1",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_pinky_touch_link.STL"
+    },
+    {
+      "dst_sha": "353d26d98baddfd70b2b92648350efea64fff0a90cbbcc76c160ac63918aee15",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_ring_distal_link.STL",
+      "src_sha": "353d26d98baddfd70b2b92648350efea64fff0a90cbbcc76c160ac63918aee15",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_ring_distal_link.STL"
+    },
+    {
+      "dst_sha": "7aa7601fd8360252144de4475e30575277f6ca20dc019e90c7df8ff9f2fc8074",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_ring_proximal_link.STL",
+      "src_sha": "7aa7601fd8360252144de4475e30575277f6ca20dc019e90c7df8ff9f2fc8074",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_ring_proximal_link.STL"
+    },
+    {
+      "dst_sha": "c3be3c69a1b7cba72d4b09c8ca4e04f3ad15ef2e47f8212bb547be7487f88022",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_ring_tip.STL",
+      "src_sha": "c3be3c69a1b7cba72d4b09c8ca4e04f3ad15ef2e47f8212bb547be7487f88022",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_ring_tip.STL"
+    },
+    {
+      "dst_sha": "e4e902e2f6c79e8bda71245bfba790b3f74d4937b23eed22b8b9522024c476e1",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_ring_touch_link.STL",
+      "src_sha": "e4e902e2f6c79e8bda71245bfba790b3f74d4937b23eed22b8b9522024c476e1",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_ring_touch_link.STL"
+    },
+    {
+      "dst_sha": "45ea4f0619da6e6f0e889d064053ff449954167fc8b015744c3dee9556eebc5b",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_distal_link.STL",
+      "src_sha": "45ea4f0619da6e6f0e889d064053ff449954167fc8b015744c3dee9556eebc5b",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_distal_link.STL"
+    },
+    {
+      "dst_sha": "bf007bb8ddfd1eda5eba12dc802d9d6ac5b4b183c93c4e1cc9b025a816cfb68b",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_metacarpal_link.STL",
+      "src_sha": "bf007bb8ddfd1eda5eba12dc802d9d6ac5b4b183c93c4e1cc9b025a816cfb68b",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_metacarpal_link.STL"
+    },
+    {
+      "dst_sha": "cb45fca20ca0cad54706f4d89635e94d8b75533c02e96ec19905956db92a0678",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_proximal_link.STL",
+      "src_sha": "cb45fca20ca0cad54706f4d89635e94d8b75533c02e96ec19905956db92a0678",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_proximal_link.STL"
+    },
+    {
+      "dst_sha": "b1d8154a4f00bb6237b5553a64dda8ef0d9026a87d3d862a643f18284d17f472",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_proximal_link_collision.STL",
+      "src_sha": "b1d8154a4f00bb6237b5553a64dda8ef0d9026a87d3d862a643f18284d17f472",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_proximal_link_collision.STL"
+    },
+    {
+      "dst_sha": "32187a2be96e85161dd54b04ab74d73239ee5ce407d8bb82375c6d1cdb75fdfe",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_tip.STL",
+      "src_sha": "32187a2be96e85161dd54b04ab74d73239ee5ce407d8bb82375c6d1cdb75fdfe",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_tip.STL"
+    },
+    {
+      "dst_sha": "7abc7f718b525d51030ceef87bb917ee5633621fab47953148ec73583b0c9c83",
+      "source": "data_extraction/assets/revo2/xml_right/meshes/right_thumb_touch_link.STL",
+      "src_sha": "7abc7f718b525d51030ceef87bb917ee5633621fab47953148ec73583b0c9c83",
+      "vendor": "de/assets/revo2/xml_right/meshes/right_thumb_touch_link.STL"
+    },
+    {
+      "dst_sha": "41e8f339dfeb0e1f298e06ea74cdcf6e0ccb31e2e3291d814a2bd182bbae3c49",
+      "source": "data_extraction/assets/revo2/xml_right/scene_right.xml",
+      "src_sha": "41e8f339dfeb0e1f298e06ea74cdcf6e0ccb31e2e3291d814a2bd182bbae3c49",
+      "vendor": "de/assets/revo2/xml_right/scene_right.xml"
+    },
+    {
+      "dst_sha": "f04362177ebeb61cd034a1408e5ab81ebc6506be862ba750b5a3965c54a13ca5",
+      "source": "third_party/openpi/ego2g1/chunk_math.py",
+      "src_sha": "f04362177ebeb61cd034a1408e5ab81ebc6506be862ba750b5a3965c54a13ca5",
+      "vendor": "eg/chunk_math.py"
+    },
+    {
+      "dst_sha": "eb773d09d8e3fb037f5cc993ea4bc7c2b6f6f4c9c90ad62057a6d8ae400944c6",
+      "source": "third_party/openpi/ego2g1/common/layout.py",
+      "src_sha": "eb773d09d8e3fb037f5cc993ea4bc7c2b6f6f4c9c90ad62057a6d8ae400944c6",
+      "vendor": "eg/common/layout.py"
+    },
+    {
+      "dst_sha": "ab6406e5c851e9db21645f3c1f56f1f196a3b94418265b84c96212d6e4eff68a",
+      "source": "third_party/openpi/ego2g1/common/se3.py",
+      "src_sha": "e34decab7fa8781a33f841f00eeb1567c13728246833e7caa9924261608b788b",
+      "vendor": "eg/common/se3.py"
+    },
+    {
+      "dst_sha": "f72bc622262c788ce45c542f53e96451c40d2eac4d54a00adfc4a223f7b68151",
+      "source": "third_party/openpi/ego2g1/deploy/safety.py",
+      "src_sha": "2cc1bc4f2344077f8ad5ab3c5e455f67becc655071b363dbcd5dc5ed7eb714cb",
+      "vendor": "eg/deploy/safety.py"
+    },
+    {
+      "dst_sha": "d31dbf294c3a574e7f72a844879cad80ee5624532b84a2c8faa4628cbfe8dafe",
+      "source": "third_party/openpi/ego2g1/deploy/trajectory.py",
+      "src_sha": "d31dbf294c3a574e7f72a844879cad80ee5624532b84a2c8faa4628cbfe8dafe",
+      "vendor": "eg/deploy/trajectory.py"
+    },
+    {
+      "dst_sha": "7ae5376385c60ec57e5b5c88be7f7cd1b72f4748c0d2316e60ec53ef93f78a90",
+      "source": "third_party/openpi/ego2g1/deploy/ramp.py",
+      "src_sha": "ef9ddbf6461de5efa64610835c423b11ede2e1e5bec4009ba6bca99f33e068e4",
+      "vendor": "eg/deploy/ramp.py"
+    },
+    {
+      "dst_sha": "6d93c45d9fd3b187b055ee2d91bc3eb496f1304796a0c12da08bae894e53b598",
+      "source": "third_party/openpi/ego2g1/deploy/dds.py",
+      "src_sha": "982e8419c80ec1fe804fd9e3e5bc2337d6377175dc5b30ba768c063d1a1b74fe",
+      "vendor": "eg/deploy/dds.py"
+    },
+    {
+      "dst_sha": "9985893a5532a29e75a346b6c9bbac2630857fe28327e792f86fdef18830e61b",
+      "source": "third_party/openpi/ego2g1/deploy/kinematics.py",
+      "src_sha": "a910bd1f8d6f1f24d77e49a854a6e8a72eed28d3c2e22835ba4ebba2d907b2d9",
+      "vendor": "eg/deploy/kinematics.py"
+    },
+    {
+      "dst_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "data_extraction/sim/__init__.py",
+      "src_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "vendor": "eg/deploy/_g1_sim/sim/__init__.py"
+    },
+    {
+      "dst_sha": "983d5b8b92f42d72902185f8c0880faf28968e44bf090f633f237096a7515e1a",
+      "source": "data_extraction/sim/g1.py",
+      "src_sha": "983d5b8b92f42d72902185f8c0880faf28968e44bf090f633f237096a7515e1a",
+      "vendor": "eg/deploy/_g1_sim/sim/g1.py"
+    },
+    {
+      "dst_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "data_extraction/common/__init__.py",
+      "src_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "vendor": "eg/deploy/_g1_sim/common/__init__.py"
+    },
+    {
+      "dst_sha": "6504efe686fc7de87e7f8ec2dd45b3e0cf99bd228993a4ee57d66e85d7d1d7cf",
+      "source": "data_extraction/common/frames.py",
+      "src_sha": "6504efe686fc7de87e7f8ec2dd45b3e0cf99bd228993a4ee57d66e85d7d1d7cf",
+      "vendor": "eg/deploy/_g1_sim/common/frames.py"
+    },
+    {
+      "dst_sha": "d565c3f15f4ea776fea95d9da6dee29ee7c2d450b48d5adf585a27390ac3ff2c",
+      "source": "data_extraction/assets/unitree_g1/CHANGELOG.md",
+      "src_sha": "d565c3f15f4ea776fea95d9da6dee29ee7c2d450b48d5adf585a27390ac3ff2c",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/CHANGELOG.md"
+    },
+    {
+      "dst_sha": "98335465f43a20b5850e4651db6e74c4aa1e9fc8e8813d38f345178045c0da50",
+      "source": "data_extraction/assets/unitree_g1/LICENSE",
+      "src_sha": "98335465f43a20b5850e4651db6e74c4aa1e9fc8e8813d38f345178045c0da50",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/LICENSE"
+    },
+    {
+      "dst_sha": "e0ca5e85f68ff9554631c3ea6ac624b469d6018a37e273daa1234e43e3ad4395",
+      "source": "data_extraction/assets/unitree_g1/README.md",
+      "src_sha": "e0ca5e85f68ff9554631c3ea6ac624b469d6018a37e273daa1234e43e3ad4395",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/README.md"
+    },
+    {
+      "dst_sha": "005fb67fbd3eff94aa8bf4a6e83238174e9f91b6721f7111594322f223724411",
+      "source": "data_extraction/assets/unitree_g1/assets/head_link.STL",
+      "src_sha": "005fb67fbd3eff94aa8bf4a6e83238174e9f91b6721f7111594322f223724411",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/head_link.STL"
+    },
+    {
+      "dst_sha": "d49e3abc6f5b12e532062cd575b87b5ef40cd2a3fc18f54a1ca5bba4f773d51d",
+      "source": "data_extraction/assets/unitree_g1/assets/left_ankle_pitch_link.STL",
+      "src_sha": "d49e3abc6f5b12e532062cd575b87b5ef40cd2a3fc18f54a1ca5bba4f773d51d",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_ankle_pitch_link.STL"
+    },
+    {
+      "dst_sha": "c4092af943141d4d9f74232f3cfa345afc6565f46a077793b8ae0e68b39dc33f",
+      "source": "data_extraction/assets/unitree_g1/assets/left_ankle_roll_link.STL",
+      "src_sha": "c4092af943141d4d9f74232f3cfa345afc6565f46a077793b8ae0e68b39dc33f",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_ankle_roll_link.STL"
+    },
+    {
+      "dst_sha": "fa752198accd104d5c4c3a01382e45165b944fbbc5acce085059223324e5bed3",
+      "source": "data_extraction/assets/unitree_g1/assets/left_elbow_link.STL",
+      "src_sha": "fa752198accd104d5c4c3a01382e45165b944fbbc5acce085059223324e5bed3",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_elbow_link.STL"
+    },
+    {
+      "dst_sha": "6b35f2f77211d5a366f0b9a4e47c4ee35e536731266f1a34e9efa12db579b892",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_index_0_link.STL",
+      "src_sha": "6b35f2f77211d5a366f0b9a4e47c4ee35e536731266f1a34e9efa12db579b892",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_index_0_link.STL"
+    },
+    {
+      "dst_sha": "9e315ebc8a7a0cb98e033985b586b20d81cf8aa761181ae61ce56fcb14077a06",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_index_1_link.STL",
+      "src_sha": "9e315ebc8a7a0cb98e033985b586b20d81cf8aa761181ae61ce56fcb14077a06",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_index_1_link.STL"
+    },
+    {
+      "dst_sha": "6b35f2f77211d5a366f0b9a4e47c4ee35e536731266f1a34e9efa12db579b892",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_middle_0_link.STL",
+      "src_sha": "6b35f2f77211d5a366f0b9a4e47c4ee35e536731266f1a34e9efa12db579b892",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_middle_0_link.STL"
+    },
+    {
+      "dst_sha": "9e315ebc8a7a0cb98e033985b586b20d81cf8aa761181ae61ce56fcb14077a06",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_middle_1_link.STL",
+      "src_sha": "9e315ebc8a7a0cb98e033985b586b20d81cf8aa761181ae61ce56fcb14077a06",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_middle_1_link.STL"
+    },
+    {
+      "dst_sha": "23a486b75bd78a9bf03cec25d84d87f97f3dae038cf21a743b6d469b337e4004",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_palm_link.STL",
+      "src_sha": "23a486b75bd78a9bf03cec25d84d87f97f3dae038cf21a743b6d469b337e4004",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_palm_link.STL"
+    },
+    {
+      "dst_sha": "a90c721661c0622685488a3c74d1e122c7da89242d3a1daef75edb83422d05e0",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_thumb_0_link.STL",
+      "src_sha": "a90c721661c0622685488a3c74d1e122c7da89242d3a1daef75edb83422d05e0",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_thumb_0_link.STL"
+    },
+    {
+      "dst_sha": "445c54a45bc13ce36001556f66bc0f49c83cb40321205ae4d676bb2874325684",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_thumb_1_link.STL",
+      "src_sha": "445c54a45bc13ce36001556f66bc0f49c83cb40321205ae4d676bb2874325684",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_thumb_1_link.STL"
+    },
+    {
+      "dst_sha": "3d8dbe5085acfc213d21aa8b0782e89cd79084e9678f3a85fc7b04a86b029db5",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hand_thumb_2_link.STL",
+      "src_sha": "3d8dbe5085acfc213d21aa8b0782e89cd79084e9678f3a85fc7b04a86b029db5",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hand_thumb_2_link.STL"
+    },
+    {
+      "dst_sha": "4725168105ee768ee31638ef22b53f6be2d7641bfd7cfefe803488d884776fa4",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hip_pitch_link.STL",
+      "src_sha": "4725168105ee768ee31638ef22b53f6be2d7641bfd7cfefe803488d884776fa4",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hip_pitch_link.STL"
+    },
+    {
+      "dst_sha": "91f25922ee8a7c3152790051bebad17b4d9cd243569c38fe340285ff93a97acf",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hip_roll_link.STL",
+      "src_sha": "91f25922ee8a7c3152790051bebad17b4d9cd243569c38fe340285ff93a97acf",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hip_roll_link.STL"
+    },
+    {
+      "dst_sha": "a16d88aa6ddac8083aa7ad55ed317bea44b1fa003d314fba88965b7ed0f3b55b",
+      "source": "data_extraction/assets/unitree_g1/assets/left_hip_yaw_link.STL",
+      "src_sha": "a16d88aa6ddac8083aa7ad55ed317bea44b1fa003d314fba88965b7ed0f3b55b",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_hip_yaw_link.STL"
+    },
+    {
+      "dst_sha": "8d92b9e3d3a636761150bb8025e32514c4602b91c7028d523ee42b3e632de477",
+      "source": "data_extraction/assets/unitree_g1/assets/left_knee_link.STL",
+      "src_sha": "8d92b9e3d3a636761150bb8025e32514c4602b91c7028d523ee42b3e632de477",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_knee_link.STL"
+    },
+    {
+      "dst_sha": "cff2221a690fa69303f61fce68f2d155c1517b52efb6ca9262dd56e0bc6e70fe",
+      "source": "data_extraction/assets/unitree_g1/assets/left_rubber_hand.STL",
+      "src_sha": "cff2221a690fa69303f61fce68f2d155c1517b52efb6ca9262dd56e0bc6e70fe",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_rubber_hand.STL"
+    },
+    {
+      "dst_sha": "f0d1cfd02fcf0d42f95e678eeca33da3afbcc366ffba5c052847773ec4f31d52",
+      "source": "data_extraction/assets/unitree_g1/assets/left_shoulder_pitch_link.STL",
+      "src_sha": "f0d1cfd02fcf0d42f95e678eeca33da3afbcc366ffba5c052847773ec4f31d52",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_shoulder_pitch_link.STL"
+    },
+    {
+      "dst_sha": "fb9df21687773522598dc384f1a2945c7519f11cbc8bd372a49170316d6eee88",
+      "source": "data_extraction/assets/unitree_g1/assets/left_shoulder_roll_link.STL",
+      "src_sha": "fb9df21687773522598dc384f1a2945c7519f11cbc8bd372a49170316d6eee88",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_shoulder_roll_link.STL"
+    },
+    {
+      "dst_sha": "1aa97e9748e924336567992181f78c7cd0652fd52a4afcca3df6b2ef6f9e712e",
+      "source": "data_extraction/assets/unitree_g1/assets/left_shoulder_yaw_link.STL",
+      "src_sha": "1aa97e9748e924336567992181f78c7cd0652fd52a4afcca3df6b2ef6f9e712e",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_shoulder_yaw_link.STL"
+    },
+    {
+      "dst_sha": "b251d8e05047f695d0f536cd78c11973cfa4e78d08cfe82759336cc3471de3a9",
+      "source": "data_extraction/assets/unitree_g1/assets/left_wrist_pitch_link.STL",
+      "src_sha": "b251d8e05047f695d0f536cd78c11973cfa4e78d08cfe82759336cc3471de3a9",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_wrist_pitch_link.STL"
+    },
+    {
+      "dst_sha": "edc387c9a0ba8c2237e9b296d32531426fabeb6f53e58df45c76106bca74148c",
+      "source": "data_extraction/assets/unitree_g1/assets/left_wrist_roll_link.STL",
+      "src_sha": "edc387c9a0ba8c2237e9b296d32531426fabeb6f53e58df45c76106bca74148c",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_wrist_roll_link.STL"
+    },
+    {
+      "dst_sha": "83f8fb3a726bf9613d65dd14f0f447cb918c3c95b3938042a0c9c09749267d3b",
+      "source": "data_extraction/assets/unitree_g1/assets/left_wrist_yaw_link.STL",
+      "src_sha": "83f8fb3a726bf9613d65dd14f0f447cb918c3c95b3938042a0c9c09749267d3b",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/left_wrist_yaw_link.STL"
+    },
+    {
+      "dst_sha": "8571a0a19bc4916fa55f91449f51d5fdefd751000054865a842449429d5f155b",
+      "source": "data_extraction/assets/unitree_g1/assets/logo_link.STL",
+      "src_sha": "8571a0a19bc4916fa55f91449f51d5fdefd751000054865a842449429d5f155b",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/logo_link.STL"
+    },
+    {
+      "dst_sha": "5ba6bbc888e630550140d3c26763f10206da8c8bd30ed886b8ede41c61f57a31",
+      "source": "data_extraction/assets/unitree_g1/assets/pelvis.STL",
+      "src_sha": "5ba6bbc888e630550140d3c26763f10206da8c8bd30ed886b8ede41c61f57a31",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/pelvis.STL"
+    },
+    {
+      "dst_sha": "5cc5c2c7a312329e3feeb2b03d3fc09fc29705bd01864f6767e51be959662420",
+      "source": "data_extraction/assets/unitree_g1/assets/pelvis_contour_link.STL",
+      "src_sha": "5cc5c2c7a312329e3feeb2b03d3fc09fc29705bd01864f6767e51be959662420",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/pelvis_contour_link.STL"
+    },
+    {
+      "dst_sha": "15be426539ec1be70246d4d82a168806db64a41301af8b35c197a33348c787a9",
+      "source": "data_extraction/assets/unitree_g1/assets/right_ankle_pitch_link.STL",
+      "src_sha": "15be426539ec1be70246d4d82a168806db64a41301af8b35c197a33348c787a9",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_ankle_pitch_link.STL"
+    },
+    {
+      "dst_sha": "4b66222ea56653e627711b56d0a8949b4920da5df091da0ceb343f54e884e3a5",
+      "source": "data_extraction/assets/unitree_g1/assets/right_ankle_roll_link.STL",
+      "src_sha": "4b66222ea56653e627711b56d0a8949b4920da5df091da0ceb343f54e884e3a5",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_ankle_roll_link.STL"
+    },
+    {
+      "dst_sha": "1be925d7aa268bb8fddf5362b9173066890c7d32092c05638608126e59d1e2ab",
+      "source": "data_extraction/assets/unitree_g1/assets/right_elbow_link.STL",
+      "src_sha": "1be925d7aa268bb8fddf5362b9173066890c7d32092c05638608126e59d1e2ab",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_elbow_link.STL"
+    },
+    {
+      "dst_sha": "12ab4300c95e437e834f9aef772b3b431c671bf34338930b52ad11aef73bbd0d",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_index_0_link.STL",
+      "src_sha": "12ab4300c95e437e834f9aef772b3b431c671bf34338930b52ad11aef73bbd0d",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_index_0_link.STL"
+    },
+    {
+      "dst_sha": "c9c34efce4563cacdcfd29fc838a982976d40f5442c71219811dcbbf3923a33d",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_index_1_link.STL",
+      "src_sha": "c9c34efce4563cacdcfd29fc838a982976d40f5442c71219811dcbbf3923a33d",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_index_1_link.STL"
+    },
+    {
+      "dst_sha": "12ab4300c95e437e834f9aef772b3b431c671bf34338930b52ad11aef73bbd0d",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_middle_0_link.STL",
+      "src_sha": "12ab4300c95e437e834f9aef772b3b431c671bf34338930b52ad11aef73bbd0d",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_middle_0_link.STL"
+    },
+    {
+      "dst_sha": "c9c34efce4563cacdcfd29fc838a982976d40f5442c71219811dcbbf3923a33d",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_middle_1_link.STL",
+      "src_sha": "c9c34efce4563cacdcfd29fc838a982976d40f5442c71219811dcbbf3923a33d",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_middle_1_link.STL"
+    },
+    {
+      "dst_sha": "86c0b231cc44477d64a6493e5a427ba16617a00738112dd187c652675b086fb9",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_palm_link.STL",
+      "src_sha": "86c0b231cc44477d64a6493e5a427ba16617a00738112dd187c652675b086fb9",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_palm_link.STL"
+    },
+    {
+      "dst_sha": "544298d0ea1088f5b276a10cc6a6a9e533efdd91594955fdc956c46211d07f83",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_thumb_0_link.STL",
+      "src_sha": "544298d0ea1088f5b276a10cc6a6a9e533efdd91594955fdc956c46211d07f83",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_thumb_0_link.STL"
+    },
+    {
+      "dst_sha": "0a9a820da8dd10f298778b714f1364216e8a5976f4fd3a05689ea26327d44bf6",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_thumb_1_link.STL",
+      "src_sha": "0a9a820da8dd10f298778b714f1364216e8a5976f4fd3a05689ea26327d44bf6",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_thumb_1_link.STL"
+    },
+    {
+      "dst_sha": "3f1bfb37668e8f61801c8d25f171fa1949e08666be86c67acad7e0079937cc45",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hand_thumb_2_link.STL",
+      "src_sha": "3f1bfb37668e8f61801c8d25f171fa1949e08666be86c67acad7e0079937cc45",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hand_thumb_2_link.STL"
+    },
+    {
+      "dst_sha": "e4f3c99d7f4a7d34eadbef9461fc66e3486cb5442db1ec50c86317d459f1a9c6",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hip_pitch_link.STL",
+      "src_sha": "e4f3c99d7f4a7d34eadbef9461fc66e3486cb5442db1ec50c86317d459f1a9c6",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hip_pitch_link.STL"
+    },
+    {
+      "dst_sha": "4c254ef66a356f492947f360dd931965477b631e3fcc841f91ccc46d945d54f6",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hip_roll_link.STL",
+      "src_sha": "4c254ef66a356f492947f360dd931965477b631e3fcc841f91ccc46d945d54f6",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hip_roll_link.STL"
+    },
+    {
+      "dst_sha": "e479c2936ca2057e9eb2f7dff6c189b7419d7b8484dea0b298cbb36a2a6aa668",
+      "source": "data_extraction/assets/unitree_g1/assets/right_hip_yaw_link.STL",
+      "src_sha": "e479c2936ca2057e9eb2f7dff6c189b7419d7b8484dea0b298cbb36a2a6aa668",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_hip_yaw_link.STL"
+    },
+    {
+      "dst_sha": "63c4008449c9bbe701a6e2b557b7a252e90cf3a5abcf54cee46862b9a69f8ec8",
+      "source": "data_extraction/assets/unitree_g1/assets/right_knee_link.STL",
+      "src_sha": "63c4008449c9bbe701a6e2b557b7a252e90cf3a5abcf54cee46862b9a69f8ec8",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_knee_link.STL"
+    },
+    {
+      "dst_sha": "99533b778bca6246144fa511bb9d4e555e075c641f2a0251e04372869cd99d67",
+      "source": "data_extraction/assets/unitree_g1/assets/right_rubber_hand.STL",
+      "src_sha": "99533b778bca6246144fa511bb9d4e555e075c641f2a0251e04372869cd99d67",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_rubber_hand.STL"
+    },
+    {
+      "dst_sha": "24cdb387e0128dfe602770a81c56cdce3a0181d34d039a11d1aaf8819b7b8c02",
+      "source": "data_extraction/assets/unitree_g1/assets/right_shoulder_pitch_link.STL",
+      "src_sha": "24cdb387e0128dfe602770a81c56cdce3a0181d34d039a11d1aaf8819b7b8c02",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_shoulder_pitch_link.STL"
+    },
+    {
+      "dst_sha": "962b97c48f9ce9e8399f45dd9522e0865d19aa9fd299406b2d475a8fc4a53e81",
+      "source": "data_extraction/assets/unitree_g1/assets/right_shoulder_roll_link.STL",
+      "src_sha": "962b97c48f9ce9e8399f45dd9522e0865d19aa9fd299406b2d475a8fc4a53e81",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_shoulder_roll_link.STL"
+    },
+    {
+      "dst_sha": "a0b76489271da0c72461a344c9ffb0f0c6e64f019ea5014c1624886c442a2fe5",
+      "source": "data_extraction/assets/unitree_g1/assets/right_shoulder_yaw_link.STL",
+      "src_sha": "a0b76489271da0c72461a344c9ffb0f0c6e64f019ea5014c1624886c442a2fe5",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_shoulder_yaw_link.STL"
+    },
+    {
+      "dst_sha": "d22f8f3b3127f15a63e5be1ee273cd5075786c3142f1c3d9f76cbf43d2a26477",
+      "source": "data_extraction/assets/unitree_g1/assets/right_wrist_pitch_link.STL",
+      "src_sha": "d22f8f3b3127f15a63e5be1ee273cd5075786c3142f1c3d9f76cbf43d2a26477",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_wrist_pitch_link.STL"
+    },
+    {
+      "dst_sha": "a7ee9212ff5b94d6cb7f52bb1bbf3f352194d5b598acff74f4c77d340c5b344f",
+      "source": "data_extraction/assets/unitree_g1/assets/right_wrist_roll_link.STL",
+      "src_sha": "a7ee9212ff5b94d6cb7f52bb1bbf3f352194d5b598acff74f4c77d340c5b344f",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_wrist_roll_link.STL"
+    },
+    {
+      "dst_sha": "bc9dece2d12509707e0057ba2e48df8f3d56db0c79410212963a25e8a50f61a6",
+      "source": "data_extraction/assets/unitree_g1/assets/right_wrist_yaw_link.STL",
+      "src_sha": "bc9dece2d12509707e0057ba2e48df8f3d56db0c79410212963a25e8a50f61a6",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/right_wrist_yaw_link.STL"
+    },
+    {
+      "dst_sha": "11ddb46f2098efbbd8816b1d65893632d8e78be936376c7cdcd6771899ccc723",
+      "source": "data_extraction/assets/unitree_g1/assets/torso_link_rev_1_0.STL",
+      "src_sha": "11ddb46f2098efbbd8816b1d65893632d8e78be936376c7cdcd6771899ccc723",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/torso_link_rev_1_0.STL"
+    },
+    {
+      "dst_sha": "b67c347a05abc3e8ddae600d98a082bee273bb39f8e651647708b0a7140a8a97",
+      "source": "data_extraction/assets/unitree_g1/assets/waist_roll_link_rev_1_0.STL",
+      "src_sha": "b67c347a05abc3e8ddae600d98a082bee273bb39f8e651647708b0a7140a8a97",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/waist_roll_link_rev_1_0.STL"
+    },
+    {
+      "dst_sha": "ec6db442b11f25eed898b5add07940c85d804f300de24dcbd264ccd8be7d554c",
+      "source": "data_extraction/assets/unitree_g1/assets/waist_yaw_link_rev_1_0.STL",
+      "src_sha": "ec6db442b11f25eed898b5add07940c85d804f300de24dcbd264ccd8be7d554c",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/assets/waist_yaw_link_rev_1_0.STL"
+    },
+    {
+      "dst_sha": "72bb2dd0bf7fab732229554d1bd80b561aa161a9dabe45778ffa70193e05e1e7",
+      "source": "data_extraction/assets/unitree_g1/g1.png",
+      "src_sha": "72bb2dd0bf7fab732229554d1bd80b561aa161a9dabe45778ffa70193e05e1e7",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1.png"
+    },
+    {
+      "dst_sha": "3c2616550a31f33e84d3c80b8e913ac5618c8888019b0c9490dae93493e647f3",
+      "source": "data_extraction/assets/unitree_g1/g1.xml",
+      "src_sha": "3c2616550a31f33e84d3c80b8e913ac5618c8888019b0c9490dae93493e647f3",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1.xml"
+    },
+    {
+      "dst_sha": "1136f50cf217f32033fd9204e8a01f3f5f4a8bbcfd25ca9ff029a75166aec647",
+      "source": "data_extraction/assets/unitree_g1/g1_fixed_base.xml",
+      "src_sha": "1136f50cf217f32033fd9204e8a01f3f5f4a8bbcfd25ca9ff029a75166aec647",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1_fixed_base.xml"
+    },
+    {
+      "dst_sha": "7bf99a486bc3d4f24629dd5ccae30b7c9c3ad595d84e685fbd1e4920d457a61f",
+      "source": "data_extraction/assets/unitree_g1/g1_mjx.xml",
+      "src_sha": "7bf99a486bc3d4f24629dd5ccae30b7c9c3ad595d84e685fbd1e4920d457a61f",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1_mjx.xml"
+    },
+    {
+      "dst_sha": "3dd0142a0fcd8f0a1f961c2f95e46b8f07b56a30b89fc78b8969d6c3aea2cc7e",
+      "source": "data_extraction/assets/unitree_g1/g1_mjx_colliders.png",
+      "src_sha": "3dd0142a0fcd8f0a1f961c2f95e46b8f07b56a30b89fc78b8969d6c3aea2cc7e",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1_mjx_colliders.png"
+    },
+    {
+      "dst_sha": "4fd1714729f70cacd6859960b80affff75cc6e50c0f7e92eeabb8f8d2fee14e8",
+      "source": "data_extraction/assets/unitree_g1/g1_with_hands.png",
+      "src_sha": "4fd1714729f70cacd6859960b80affff75cc6e50c0f7e92eeabb8f8d2fee14e8",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1_with_hands.png"
+    },
+    {
+      "dst_sha": "2d41a3c6783fbf9e17349608d9c2222d970163b1db315ce9f30c4a97631fc078",
+      "source": "data_extraction/assets/unitree_g1/g1_with_hands.xml",
+      "src_sha": "2d41a3c6783fbf9e17349608d9c2222d970163b1db315ce9f30c4a97631fc078",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/g1_with_hands.xml"
+    },
+    {
+      "dst_sha": "e3f3a82afba68e1fbf6546d0d8ec1c9896d7c5117d7f9e2171f2dccd5740f80b",
+      "source": "data_extraction/assets/unitree_g1/scene.xml",
+      "src_sha": "e3f3a82afba68e1fbf6546d0d8ec1c9896d7c5117d7f9e2171f2dccd5740f80b",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/scene.xml"
+    },
+    {
+      "dst_sha": "d2597238705ec7f176dc3061751748c1638dd3b3097e01f4f0aeefd6384bb323",
+      "source": "data_extraction/assets/unitree_g1/scene_fixed_base.xml",
+      "src_sha": "d2597238705ec7f176dc3061751748c1638dd3b3097e01f4f0aeefd6384bb323",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/scene_fixed_base.xml"
+    },
+    {
+      "dst_sha": "112b12e4d2cb3330e5062ff7b331b946c3c37121f35de0bace507d274ef06bda",
+      "source": "data_extraction/assets/unitree_g1/scene_mjx.xml",
+      "src_sha": "112b12e4d2cb3330e5062ff7b331b946c3c37121f35de0bace507d274ef06bda",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/scene_mjx.xml"
+    },
+    {
+      "dst_sha": "69a995bc8f8ba05de416de0944635e386f0581a82ce8cf2bbe3f50d4bd64e812",
+      "source": "data_extraction/assets/unitree_g1/scene_with_hands.xml",
+      "src_sha": "69a995bc8f8ba05de416de0944635e386f0581a82ce8cf2bbe3f50d4bd64e812",
+      "vendor": "eg/deploy/_g1_sim/assets/unitree_g1/scene_with_hands.xml"
+    }
+  ]
+}
