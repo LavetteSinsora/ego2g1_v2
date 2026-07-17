@@ -13,3 +13,4 @@ MUJOCO_LOG.TXT
 # generated dashboards / recordings
 *_dashboard.html
 recordings/
+*.egg-info/
