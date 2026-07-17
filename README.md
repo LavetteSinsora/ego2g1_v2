@@ -38,9 +38,24 @@ there. Everything above that boundary runs and tests offline.
 ```bash
 git clone --recursive <url> && cd ego2g1_v2
 uv sync                    # core + kin + data
-uv sync --group train      # + jax/openpi   (see envs/ for the PPU box)
-uv sync --group deploy     # + DDS/unitree_deploy (robot PC)
+uv sync --group train      # + openpi (submodule path dep; PPU box uses envs/ instead)
+uv sync --group deploy     # + unitree_deploy/DDS (robot PC)
+uv run python -m pytest tests/ -q         # 203 pass on a working setup
+
+# per-machine env facts (proxy, PPU allocator traps, robot subnet):
+source envs/<machine>.sh   # mac-dev | ppu-train | ppu-serve | robot
 ```
 
-Status: under construction — porting from the original tree. Per-area docs land
-with each port.
+## Where things stand
+
+- Extraction, training, serving, deploy, teleop all ported; 203 tests pass.
+- The re-extracted dataset (`data/lerobot_datasets/ego2g1/put_bottle_in_box_ego`,
+  extraction hash `7b7f8bb7…`) carries smooth proprioception: joint accel RMS
+  median 29.9 → 6.1 rad/s² vs the old pipeline. Training expects this hash.
+- Deploy is built on unitree_deploy's proven 500 Hz interpolating executor with
+  two first-class action modes (joint / relative-EEF); its EEF→joint conversion
+  measured 42.5× smoother than the old path on synthetic Pico-grade noise.
+- Hardware-unverified: damp() e-stop internals, vendor connect() init ramp,
+  Brainco motor order, and the serve-latency fix (docs/deploy.md "open risks").
+  The dataset-replay A/B (old jittery dataset vs this one) is the first thing
+  to run on the robot.

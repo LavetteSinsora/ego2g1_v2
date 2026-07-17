@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <!-- Pin to the WiFi interface that talks to the robot, e.g. wlan0 -->
+      <Interfaces>
+        <NetworkInterface name="wlan0" priority="default" multicast="false"/>
+      </Interfaces>
+      <!-- Don't fall back to multicast for data; use unicast everywhere -->
+      <AllowMulticast>false</AllowMulticast>
+      <!-- Large samples (full LowState) must not exceed datagram limits silently -->
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>1344B</FragmentSize>
+    </General>
+
+    <Discovery>
+      <!-- Discovery still needs to find the robot; use unicast peers since
+           multicast is unreliable on WiFi. Replace with the robot's IP. -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer address="192.168.123.161"/>  <!-- robot IP: change to yours -->
+      </Peers>
+    </Discovery>
+
+    <Internal>
+      <!-- Help reassembly of fragmented large samples over a lossy link -->
+      <DefragUnreliableMaxSamples>32</DefragUnreliableMaxSamples>
+    </Internal>
+  </Domain>
+</CycloneDDS>

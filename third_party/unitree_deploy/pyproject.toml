@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitree_deploy"
+version = "0.0.5"
+description = "unitree deploy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [
+    { name = "hengguo", email = "rd_gh@unitree.com" }
+]
+keywords = ["unitree", "robotics", "deployment"]
+
+# VENDOR PATCH (ego2g1): lerobot==0.4.1 removed — it conflicts with the repo's
+# openpi-pinned lerobot rev, and only unitree_deploy's own lerobot wrappers
+# (lerobot_policy_server/client, eval_dataset_env, camera configs) import it;
+# the executor path we use (g1_arm, joint_trajcetory_inter, brainco) does not.
+# meshcat/pyrealsense2/matplotlib also dropped: unused by the executor path.
+dependencies = [
+    "tyro",
+    "draccus",
+    "numpy",
+    "opencv-python",
+    "mujoco",
+    "logging_mp"
+]
+[tool.setuptools]
+packages = ["unitree_deploy"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = ["build", "venv", "__pycache__"]
+fix = true
+show-fixes = true
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "N", "B", "C4", "SIM"]
+ignore = ["N801"]
+
+[tool.ruff.lint.per-file-ignores]
+"robot_devices_index.py" = ["N815"]

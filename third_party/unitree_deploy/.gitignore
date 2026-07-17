@@ -1,0 +1,10 @@
+.vscode
+.ruff_cache
+__pycache__/
+unitree_deploy.egg-info
+
+unitree_sdk2_python
+*.png
+unitree_deploy/robot_devices/arm/unitree_arm_interface.cpython-310-x86_64-linux-gnu.so
+
+.codex
