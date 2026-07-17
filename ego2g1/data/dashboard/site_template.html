@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>data_extraction dashboard</title>
+<style>
+  :root {
+    --surface-1: #fcfcfb; --page: #f9f9f7;
+    --ink-1: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --mode-meas: #1baf7a; --mode-gt: #2a78d6;
+    --bad: #d5493f; --warn: #d98c1f;
+    --kept: rgba(27,175,122,0.10); --flagbg: rgba(213,73,63,0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1: #1a1a19; --page: #0d0d0d;
+      --ink-1: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --mode-meas: #199e70; --mode-gt: #3987e5;
+      --kept: rgba(27,175,122,0.12); --flagbg: rgba(213,73,63,0.14);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink-1);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 14px 16px 60px; }
+  header { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+    margin-bottom: 10px; }
+  h1 { font-size: 19px; margin: 0; }
+  select { font: inherit; padding: 4px 8px; background: var(--surface-1);
+    color: var(--ink-1); border: 1px solid var(--ring); border-radius: 7px; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  #status { color: var(--ink-2); font-size: 13px; margin: 8px 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .chip { background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 6px; padding: 4px 10px; font-size: 12.5px; color: var(--ink-2); }
+  .chip b { color: var(--ink-1); font-weight: 600; }
+  .chip.bad b { color: var(--bad); }
+  .stage { display: grid; grid-template-columns: 3fr 3fr 2fr 2fr; gap: 10px; }
+  @media (max-width: 900px) { .stage { grid-template-columns: 1fr 1fr; } }
+  .pane { background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 8px; position: relative; }
+  .pane .cap { font-size: 12px; color: var(--muted); margin: 2px 2px 6px; }
+  .pane img { width: 100%; display: block; border-radius: 6px; background: #000; }
+  .pane .drop { position: absolute; top: 30px; right: 14px; display: none;
+    background: var(--bad); color: #fff; font-size: 11px; font-weight: 600;
+    border-radius: 5px; padding: 2px 7px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 12px 0 4px; }
+  .controls button { border: 1px solid var(--ring); background: var(--surface-1);
+    color: var(--ink-1); border-radius: 7px; padding: 5px 13px; font: inherit;
+    cursor: pointer; }
+  .controls input[type=range] { flex: 1; accent-color: var(--mode-meas); }
+  .tickinfo { color: var(--ink-2); font-size: 12.5px; margin-bottom: 10px;
+    font-variant-numeric: tabular-nums; min-height: 1.4em; }
+  .tickinfo .flag { color: var(--bad); font-weight: 600; }
+  .tlbox { background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 10px 10px 4px; margin: 8px 0 14px; }
+  .tlbox h3, .chart h3 { font-size: 12.5px; font-weight: 600; color: var(--ink-2);
+    margin: 0 0 4px; }
+  .tlbox svg, .chart svg { width: 100%; display: block; overflow: visible; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 0 6px;
+    font-size: 12.5px; color: var(--ink-2); }
+  .legend svg { vertical-align: -3px; margin-right: 6px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 10px; }
+  .chart { background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 10px 10px 4px; position: relative; }
+  .tt { position: absolute; pointer-events: none; display: none; z-index: 3;
+    background: var(--surface-1); border: 1px solid var(--ring); border-radius: 7px;
+    padding: 6px 9px; font-size: 12px; color: var(--ink-2);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.18); white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .tt b { color: var(--ink-1); }
+  details { margin-top: 22px; color: var(--ink-2); }
+  details pre { background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 8px; padding: 10px; overflow-x: auto; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; background: var(--surface-1);
+    border: 1px solid var(--ring); font-size: 12.5px;
+    font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--ring); }
+  th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0;
+    background: var(--surface-1); }
+  td:first-child, th:first-child { text-align: left; }
+  tr.flag { background: var(--flagbg); }
+  tr.flag td:first-child::before { content: "⚑ "; color: var(--bad); }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover td { background: var(--kept); }
+  .warn { color: var(--bad); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>data_extraction dashboard</h1>
+    <label>episode:
+      <select id="pick"><option value="">— batch summary —</option></select>
+    </label>
+    <span class="hint">←/→ switch episode · space play/pause · click any chart
+      to seek · serve this dir over http (fetch is blocked on file://)</span>
+  </header>
+  <div id="status"></div>
+
+  <div id="batchView">
+    <div class="chips" id="batchChips"></div>
+    <div style="overflow-x:auto"><table id="batchTable"></table></div>
+  </div>
+
+  <div id="epView" style="display:none">
+    <div class="chips" id="chips"></div>
+    <div class="stage">
+      <div class="pane"><div class="cap">human egocentric view</div>
+        <img id="imgHuman" alt="human view"></div>
+      <div class="pane"><div class="cap" id="g1Cap">G1 replay</div>
+        <img id="imgG1" alt="G1 render"><div class="drop" id="dropG1">dropped tick</div></div>
+      <div class="pane"><div class="cap">left hand (dynamic replay)</div>
+        <img id="imgHandL" alt="left hand"><div class="drop" id="dropHandL">dropped tick</div></div>
+      <div class="pane"><div class="cap">right hand (dynamic replay)</div>
+        <img id="imgHandR" alt="right hand"><div class="drop" id="dropHandR">dropped tick</div></div>
+    </div>
+    <div class="controls">
+      <button id="play">▶</button>
+      <input type="range" id="scrub" min="0" value="0" step="1">
+    </div>
+    <div class="tickinfo" id="tickinfo"></div>
+    <div class="tlbox">
+      <h3>timeline — sub-episodes (green = kept) and per-tick filter verdicts (red = bad)</h3>
+      <svg id="timeline"></svg>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="charts" id="charts"></div>
+    <details><summary>placement S, alignment B, filter stats</summary>
+      <pre id="calib"></pre></details>
+  </div>
+</div>
+
+<script>
+const MODE_COLOR = { "measured": "var(--mode-meas)", "ground-truth": "var(--mode-gt)" };
+const W = 560, PAD = { l: 40, r: 10, t: 6, b: 18 }, H_CH = 150;
+let DATA = null, T = 0, tick = 0, playing = null;
+const $ = id => document.getElementById(id);
+
+// ------------------------------------------------------------ manifest/nav
+let MANIFEST = { episodes: [], batch: [] };
+const pick = $("pick");
+
+async function boot() {
+  try {
+    MANIFEST = await (await fetch("manifest.json")).json();
+  } catch (e) {
+    $("status").innerHTML = "<span style='color:var(--bad)'>could not load " +
+      "manifest.json — serve this directory over http, e.g. " +
+      "<code>python3 -m http.server -d dashboard_site 8123</code></span>";
+    return;
+  }
+  for (const ep of MANIFEST.episodes) {
+    const o = document.createElement("option");
+    o.value = ep; o.textContent = ep; pick.appendChild(o);
+  }
+  renderBatch();
+  const want = decodeURIComponent(location.hash.slice(1));
+  if (want && MANIFEST.episodes.includes(want)) { pick.value = want; loadEpisode(want); }
+}
+pick.onchange = () => { pick.value ? loadEpisode(pick.value) : showBatch(); };
+addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === " " && DATA) { e.preventDefault(); $("play").click(); }
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  const i = pick.selectedIndex + (e.key === "ArrowRight" ? 1 : -1);
+  if (i >= 0 && i < pick.options.length) { pick.selectedIndex = i; pick.onchange(); }
+});
+
+function showBatch() {
+  stop_();
+  location.hash = "";
+  $("epView").style.display = "none";
+  $("batchView").style.display = "";
+  $("status").textContent = "";
+}
+
+async function loadEpisode(ep) {
+  stop_();
+  $("status").textContent = "loading episodes/" + ep + ".json …";
+  let d;
+  try { d = await (await fetch("episodes/" + ep + ".json")).json(); }
+  catch (e) { $("status").textContent = "failed to load " + ep + ": " + e; return; }
+  location.hash = encodeURIComponent(ep);
+  $("batchView").style.display = "none";
+  $("epView").style.display = "";
+  $("status").textContent = "";
+  render(d);
+}
+
+// -------------------------------------------------------------- batch view
+function renderBatch() {
+  const rows = MANIFEST.batch || [];
+  const nf = rows.filter(r => r.flag).length;
+  $("batchChips").innerHTML = "";
+  const chipB = (h, cls) => { const d = document.createElement("div");
+    d.className = "chip" + (cls ? " " + cls : ""); d.innerHTML = h;
+    $("batchChips").appendChild(d); };
+  chipB(`<b>${rows.length}</b> episodes`);
+  chipB(`source <b>${MANIFEST.source || "?"}</b>`);
+  if (nf) chipB(`<b>${nf}</b> flagged`, "bad"); else chipB("<b>0</b> flagged");
+  const num = (v, d=2) => v == null ? "—" : (+v).toFixed(d);
+  const warn = (v, thr, d=2) => v > thr ? `<span class="warn">${num(v,d)}</span>` : num(v,d);
+  let h = `<thead><tr><th>episode</th><th>ticks kept</th><th>subeps</th>
+    <th>L pos max (cm)</th><th>R pos max</th><th>L ori max (°)</th><th>R ori max</th>
+    <th>blocked</th><th>contact</th><th>dropped</th></tr></thead><tbody>`;
+  for (const r of rows)
+    h += `<tr class="pick ${r.flag ? "flag" : ""}" data-ep="${r.episode}">
+      <td>${r.episode}</td><td>${r.ticks_kept}/${r.ticks_total}</td><td>${r.n_subeps}</td>
+      <td>${warn(r.pos_max_l, 2)}</td><td>${warn(r.pos_max_r, 2)}</td>
+      <td>${num(r.ori_max_l, 1)}</td><td>${num(r.ori_max_r, 1)}</td>
+      <td>${warn(r.blocked_l + r.blocked_r, 0, 0)}</td>
+      <td>${warn(r.contact_l + r.contact_r, 0, 0)}</td>
+      <td>${num(r.drop_total * 100, 1)}%</td></tr>`;
+  $("batchTable").innerHTML = h + "</tbody>";
+  $("batchTable").querySelectorAll("tr.pick").forEach(tr =>
+    tr.onclick = () => { pick.value = tr.dataset.ep; pick.onchange(); });
+}
+
+// ------------------------------------------------------------ episode view
+function stop_() { if (playing) { clearInterval(playing); playing = null; $("play").textContent = "▶"; } }
+
+function xPix(k) { return PAD.l + (W - PAD.l - PAD.r) * (T <= 1 ? 0 : k / (T - 1)); }
+function seekFromEvent(svg, ev) {
+  const r = svg.getBoundingClientRect();
+  const fx = (ev.clientX - r.left) / r.width * W;
+  show(Math.max(0, Math.min(T - 1, Math.round((fx - PAD.l) / (W - PAD.l - PAD.r) * (T - 1)))));
+}
+function niceMax(v) {
+  if (!isFinite(v) || v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const s of [1, 2, 2.5, 5, 10]) if (v <= s * p) return s * p;
+  return 10 * p;
+}
+const fmt = (v, d) => v === null || v === undefined ? "—" : v.toFixed(d);
+function lastFrame(list, k) {
+  for (let j = k; j >= 0; j--) if (list[j] !== null) return [list[j], j !== k];
+  for (let j = k + 1; j < T; j++) if (list[j] !== null) return [list[j], true];
+  return [null, true];
+}
+function setPane(img, dropEl, list, k) {
+  const [f, dropped] = lastFrame(list, k);
+  if (f !== null) img.src = "data:image/webp;base64," + f;
+  if (dropEl) dropEl.style.display = dropped ? "block" : "none";
+}
+
+function show(k) {
+  tick = k;
+  $("scrub").value = k;
+  $("imgHuman").src = "data:image/webp;base64," + DATA.human.slots[DATA.human.slot_of[k]];
+  setPane($("imgG1"), $("dropG1"), DATA.g1.frames, k);
+  setPane($("imgHandL"), $("dropHandL"), DATA.hands.left.frames, k);
+  setPane($("imgHandR"), $("dropHandR"), DATA.hands.right.frames, k);
+  const am = DATA.arm[DATA.g1.mode];
+  const flags = [];
+  if (DATA.hands.left.blocked[k]) flags.push("L blocked");
+  if (DATA.hands.right.blocked[k]) flags.push("R blocked");
+  if (DATA.hands.left.contact[k]) flags.push("L contact");
+  if (DATA.hands.right.contact[k]) flags.push("R contact");
+  for (const [name, m] of Object.entries(DATA.masks))
+    if (name !== "bad_any" && m[k]) flags.push(name);
+  const se = DATA.subep_of[k];
+  $("tickinfo").innerHTML =
+    `t = ${(k / DATA.fps).toFixed(2)} s · tick ${k}/${T - 1} (src ${DATA.tick_orig[k]})` +
+    (se >= 0 ? ` · subep ${se} chunk ${DATA.chunk[k] ?? "—"}` : " · <span class='flag'>outside sub-episodes</span>") +
+    ` · ${DATA.g1.mode} err L ${fmt(am.left.pos[k], 2)} cm / ${fmt(am.left.ori[k], 1)}°` +
+    ` R ${fmt(am.right.pos[k], 2)} cm / ${fmt(am.right.ori[k], 1)}°` +
+    ` · hand err L ${fmt(DATA.hands.left.err_deg[k], 1)}° R ${fmt(DATA.hands.right.err_deg[k], 1)}°` +
+    (flags.length ? ` · <span class="flag">${flags.join(" · ")}</span>` : "");
+  document.querySelectorAll(".cursorline").forEach(el => {
+    el.setAttribute("x1", xPix(k)); el.setAttribute("x2", xPix(k));
+  });
+}
+
+$("scrub").oninput = () => show(+$("scrub").value);
+$("play").onclick = function () {
+  if (!DATA) return;
+  if (playing) { stop_(); return; }
+  this.textContent = "⏸";
+  playing = setInterval(() => show((tick + 1) % T), 1000 / DATA.fps);
+};
+
+function subepDecor(y0, y1) {
+  let g = "";
+  for (const [s, e, realEnd] of DATA.subeps) {
+    g += `<rect x="${xPix(s)}" y="${y0}" width="${Math.max(1, xPix(e - 1) - xPix(s))}"
+          height="${y1 - y0}" fill="var(--kept)"/>`;
+    g += `<line x1="${xPix(s)}" y1="${y0}" x2="${xPix(s)}" y2="${y1}"
+          stroke="var(--mode-meas)" stroke-width="1"/>`;
+    const xe = xPix(e - 1);
+    g += `<line x1="${xe}" y1="${y0}" x2="${xe}" y2="${y1}"
+          stroke="${realEnd ? "var(--mode-meas)" : "var(--warn)"}" stroke-width="${realEnd ? 1 : 2}"
+          ${realEnd ? "" : 'stroke-dasharray="3 3"'}/>`;
+    if (!realEnd)
+      g += `<text x="${xe + 3}" y="${y0 + 9}" font-size="9" fill="var(--warn)">cut</text>`;
+  }
+  return g;
+}
+
+function addChart(title, seriesList, unit, marks) {
+  const box = document.createElement("div");
+  box.className = "chart";
+  box.innerHTML = `<h3>${title}</h3>`;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H_CH}`);
+  const tt = document.createElement("div"); tt.className = "tt";
+  const binW = Math.max(0.8, (W - PAD.l - PAD.r) / Math.max(1, T - 1));
+
+  const all = seriesList.flatMap(s => s.vals.filter(v => v !== null));
+  const ymax = niceMax(Math.max(...all, 1e-6));
+  const y = v => PAD.t + (H_CH - PAD.t - PAD.b) * (1 - Math.min(v, ymax) / ymax);
+
+  let g = subepDecor(PAD.t, H_CH - PAD.b);
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax * i / 4, yy = y(v);
+    g += `<line x1="${PAD.l}" y1="${yy}" x2="${W - PAD.r}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    g += `<text x="${PAD.l - 5}" y="${yy + 3.5}" text-anchor="end" font-size="10"
+          fill="var(--muted)">${+v.toFixed(v < 10 ? (v < 1 ? 2 : 1) : 0)}</text>`;
+  }
+  for (let k = DATA.H; k < T; k += DATA.H)
+    g += `<line x1="${xPix(k)}" y1="${PAD.t}" x2="${xPix(k)}" y2="${H_CH - PAD.b}"
+          stroke="var(--axis)" stroke-width="1" stroke-dasharray="2 4"/>`;
+  g += `<line x1="${PAD.l}" y1="${y(0)}" x2="${W - PAD.r}" y2="${y(0)}" stroke="var(--axis)" stroke-width="1"/>`;
+  const secEvery = Math.max(1, Math.round(DATA.fps * 2));
+  for (let k = 0; k < T; k += secEvery)
+    g += `<text x="${xPix(k)}" y="${H_CH - 4}" text-anchor="middle" font-size="10"
+          fill="var(--muted)">${(k / DATA.fps).toFixed(0)}s</text>`;
+  for (const s of seriesList) {
+    let seg = [];
+    const flush = () => { if (seg.length > 1)
+      g += `<polyline points="${seg.join(" ")}" fill="none" stroke="${s.color}"
+            stroke-width="2" stroke-linejoin="round"
+            ${s.dash ? 'stroke-dasharray="4 3" opacity="0.8"' : ""}/>`;
+      else if (seg.length === 1)
+      g += `<circle cx="${seg[0].split(",")[0]}" cy="${seg[0].split(",")[1]}" r="1.5" fill="${s.color}"/>`;
+      seg = []; };
+    s.vals.forEach((v, k) => {
+      if (v === null) flush();
+      else seg.push(`${xPix(k).toFixed(1)},${y(v).toFixed(1)}`);
+    });
+    flush();
+  }
+  if (marks)
+    for (const mk of marks)
+      mk.mask.forEach((on, k) => { if (on)
+        g += `<rect x="${xPix(k) - binW / 2}" y="${mk.row === 1 ? PAD.t + 6 : PAD.t}"
+              width="${binW}" height="5" fill="${mk.color}"/>`; });
+  g += `<line class="cursorline" x1="${xPix(0)}" y1="${PAD.t}" x2="${xPix(0)}" y2="${H_CH - PAD.b}"
+        stroke="var(--ink-1)" stroke-width="1" opacity="0.55"/>`;
+  svg.innerHTML = g;
+  box.appendChild(svg); box.appendChild(tt); $("charts").appendChild(box);
+
+  svg.addEventListener("mousemove", ev => {
+    const r = svg.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width * W;
+    const k = Math.max(0, Math.min(T - 1, Math.round((fx - PAD.l) / (W - PAD.l - PAD.r) * (T - 1))));
+    tt.style.display = "block";
+    tt.style.left = Math.min(ev.clientX - r.left + 14, r.width - 190) + "px";
+    tt.style.top = "8px";
+    let rows = `<b>t=${(k / DATA.fps).toFixed(2)} s</b> · tick ${k}`;
+    for (const s of seriesList)
+      rows += `<br><span style="color:${s.color}">●</span> ${s.label}: ` +
+        `<b>${s.vals[k] === null ? "—" : s.vals[k].toFixed(2)}</b> ${unit}`;
+    tt.innerHTML = rows;
+  });
+  svg.addEventListener("mouseleave", () => tt.style.display = "none");
+  svg.addEventListener("click", ev => seekFromEvent(svg, ev));
+}
+
+function render(d) {
+  DATA = d; T = d.T; tick = 0;
+  $("chips").innerHTML = ""; $("legend").innerHTML = "";
+  $("charts").innerHTML = ""; $("timeline").innerHTML = "";
+  $("scrub").max = T - 1;
+
+  const chip = (h, cls) => { const el = document.createElement("div");
+    el.className = "chip" + (cls ? " " + cls : ""); el.innerHTML = h;
+    $("chips").appendChild(el); };
+  chip(`<b>${d.episode}</b> (${d.source})`);
+  chip(`<b>${T}</b> ticks @ <b>${d.fps}</b> Hz`);
+  chip(`chunk H <b>${d.H}</b>`);
+  chip(`kept <b>${d.ticks_kept}/${d.ticks_total}</b> in <b>${d.subeps.length}</b> sub-episode(s)`);
+  chip(`B mode <b>${d.b_mode}</b>`);
+  chip(`config <b>${d.config_hash}</b>`);
+  for (const [k, v] of Object.entries(d.filter_stats || {}))
+    if (v > 0 && k !== "bad_any") chip(`${k} <b>${v}</b>`, "bad");
+  $("g1Cap").textContent = `G1 replay — ${d.g1.mode} anchor`;
+
+  // timeline
+  (() => {
+    const rows = Object.keys(d.masks).filter(k => d.masks[k].some(v => v));
+    const names = rows.length ? rows : ["bad_any"];
+    const rh = 14, h = PAD.t + names.length * rh + PAD.b;
+    const binW = Math.max(0.8, (W - PAD.l - PAD.r) / Math.max(1, T - 1));
+    const svg = $("timeline");
+    svg.setAttribute("viewBox", `0 0 ${W} ${h}`);
+    let g = subepDecor(PAD.t, PAD.t + names.length * rh);
+    names.forEach((name, i) => {
+      const y = PAD.t + i * rh;
+      g += `<text x="${PAD.l - 5}" y="${y + rh - 4}" text-anchor="end" font-size="9"
+            fill="var(--muted)">${name}</text>`;
+      g += `<line x1="${PAD.l}" y1="${y + rh}" x2="${W - PAD.r}" y2="${y + rh}"
+            stroke="var(--grid)" stroke-width="0.5"/>`;
+      const m = d.masks[name] || [];
+      for (let k = 0; k < T; k++)
+        if (m[k]) g += `<rect x="${xPix(k) - binW / 2}" y="${y + 2}" width="${binW}"
+            height="${rh - 4}" fill="var(--bad)"/>`;
+    });
+    const secEvery = Math.max(1, Math.round(d.fps * 2));
+    for (let k = 0; k < T; k += secEvery)
+      g += `<text x="${xPix(k)}" y="${h - 5}" text-anchor="middle" font-size="9"
+            fill="var(--muted)">${(k / d.fps).toFixed(0)}s</text>`;
+    g += `<line class="cursorline" x1="${xPix(0)}" y1="${PAD.t}" x2="${xPix(0)}"
+          y2="${h - PAD.b}" stroke="var(--ink-1)" stroke-width="1" opacity="0.55"/>`;
+    svg.innerHTML = g;
+    svg.onclick = ev => seekFromEvent(svg, ev);
+  })();
+
+  // legend
+  const legendItem = (color, dash, label) => {
+    const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    s.setAttribute("width", 26); s.setAttribute("height", 10);
+    s.innerHTML = `<line x1="1" y1="5" x2="25" y2="5" stroke="${color}" stroke-width="2"
+      ${dash ? 'stroke-dasharray="4 3"' : ""}/>`;
+    const el = document.createElement("span"); el.appendChild(s);
+    el.appendChild(document.createTextNode(label)); $("legend").appendChild(el);
+  };
+  for (const m of Object.keys(d.arm))
+    legendItem(MODE_COLOR[m], m === "ground-truth",
+      m === "measured"
+        ? "measured anchor: chunks re-anchor on achieved FK — deployment-faithful, drift accumulates"
+        : "ground-truth anchor: chunks re-anchor on the stored pose — isolates per-chunk IK quality");
+  legendItem("var(--bad)", false, "hand blocked (sustained servo error, static command)");
+  legendItem("var(--warn)", false, "non-pinch self-contact");
+
+  // charts
+  for (const side of ["left", "right"])
+    for (const [met, unit] of [["pos", "cm"], ["ori", "deg"]])
+      addChart(`${side} arm — ${met === "pos" ? "position" : "orientation"} error vs stored pose (${unit})`,
+        Object.keys(d.arm).map(m => ({ vals: d.arm[m][side][met], color: MODE_COLOR[m],
+          dash: m === "ground-truth", label: m })), unit);
+  for (const side of ["left", "right"]) {
+    const h = d.hands[side];
+    addChart(`${side} hand — servo tracking error, worst motor (deg)`,
+      [{ vals: h.err_deg, color: "var(--ink-2)", dash: false, label: "err" }], "deg",
+      [{ mask: h.blocked, color: "var(--bad)", row: 0 },
+       { mask: h.contact, color: "var(--warn)", row: 1 }]);
+  }
+
+  $("calib").textContent =
+    `source: ${d.meta.source_episode}\n  file: ${d.meta.source_file}\n\n` +
+    `placement S (Pico MuJoCo world -> robot world):\n` +
+    d.S.map(r => "  " + r.join("  ")).join("\n") + "\n\n" +
+    `alignment B rotation (wrist -> flange, baked into the stored poses):\n` +
+    `left:\n${d.B.left.map(r => "  " + r.join("  ")).join("\n")}\n` +
+    `right:\n${d.B.right.map(r => "  " + r.join("  ")).join("\n")}\n\n` +
+    `filter stats: ${JSON.stringify(d.filter_stats)}\n` +
+    `hand contact pairs: L ${JSON.stringify(d.hands.left.pair_counts)}\n` +
+    `                    R ${JSON.stringify(d.hands.right.pair_counts)}`;
+
+  show(0);
+}
+
+boot();
+</script>
+</body>
+</html>

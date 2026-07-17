@@ -30,13 +30,18 @@ class RelativeChunkActions:
     plus `actions` (H, (9+6)*len(hands)) f32 where per hand
     delta_k = vec9_to_se3(pose_0)^-1 @ vec9_to_se3(pose_k), k = 1..H,
     re-encoded as vec9 and concatenated [eef 9 | hand 6].
-    Everything else passes through unchanged.
+    Everything else passes through unchanged. A sample without pose keys
+    (e.g. a state-only inference request) passes through untouched — this
+    matches the openpi transform-pipeline contract (fork behavior, adopted
+    when the byte-copy was folded back in here).
     """
 
     def __init__(self, hands=("left", "right")):
         self.hands = tuple(hands)
 
     def __call__(self, sample):
+        if not any(f"pose.{h}" in sample for h in self.hands):
+            return sample
         out = dict(sample)
         parts = []
         for hand in self.hands:

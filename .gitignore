@@ -1,5 +1,5 @@
 # raw recordings + generated datasets (regenerable; see docs/data.md)
-data/
+/data/
 # per-stage recompute cache
 ego2g1/data/work/
 # envs

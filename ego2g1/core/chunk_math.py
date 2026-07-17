@@ -8,4 +8,5 @@ relative_actions.py / boundary.py; this facade is the stable import surface.
 """
 
 from .boundary import *          # noqa: F401,F403
+from .rot6d import mat_to_6d, rot6d_to_mat, se3_to_vec9, vec9_to_se3  # noqa: F401
 from .relative_actions import *  # noqa: F401,F403
