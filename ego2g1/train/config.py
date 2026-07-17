@@ -39,12 +39,14 @@ class Ego2G1TrainConfig:
     expected_config_hash: str | None = "7b7f8bb70e3e7f1c"
     fps: int = 30 # data's corresponding frequency (how many actions correspond to 1 second of expected execution)
     hands: tuple[str, ...] = ("left", "right") # order of hand in action label (i.e., which hand occupies the first 15-dim of the action)
+    # these must match the sidecar's source_episode strings (raw-dir name /
+    # episode stem) — the re-extracted dataset records put_bottle_in_box_ego/*
     val_real_episodes: tuple[str, ...] = (
-        "put_bottle_in_box/episode_10", "put_bottle_in_box/episode_20",
-        "put_bottle_in_box/episode_30", "put_bottle_in_box/episode_40",
-        "put_bottle_in_box/episode_50", "put_bottle_in_box/episode_60",
-        "put_bottle_in_box/episode_70", "put_bottle_in_box/episode_80",
-        "put_bottle_in_box/episode_90",
+        "put_bottle_in_box_ego/episode_10", "put_bottle_in_box_ego/episode_20",
+        "put_bottle_in_box_ego/episode_30", "put_bottle_in_box_ego/episode_40",
+        "put_bottle_in_box_ego/episode_50", "put_bottle_in_box_ego/episode_60",
+        "put_bottle_in_box_ego/episode_70", "put_bottle_in_box_ego/episode_80",
+        "put_bottle_in_box_ego/episode_90",
     ) # which episodes are validation episodes and should be held-out for norm stat calculation
 
     # --- model ---
