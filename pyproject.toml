@@ -73,5 +73,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["ego2g1"]
 
+# the lerobot pin is a git URL; hatchling requires opting into direct refs
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests", "ego2g1"]
