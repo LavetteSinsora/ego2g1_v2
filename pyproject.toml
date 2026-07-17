@@ -23,18 +23,38 @@ dependencies = [
     # dataset writing: datasets MUST stay 3.6.0 (newer breaks the pinned lerobot
     # API and writes parquet the training env can't read back)
     "datasets==3.6.0",
-    # lerobot is pinned to openpi's rev — filled in by the data port from
-    # s005_write_lerobot.INSTALL_CMD; placeholder until then:
-    # "lerobot @ git+https://github.com/huggingface/lerobot@<openpi-pin>",
+    # lerobot at openpi's exact rev (was s005_write_lerobot.INSTALL_CMD)
+    "lerobot @ git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
+    "pandas",
 ]
 
 [dependency-groups]
-# Owned by the area ports; agents record additions in docs/deps-<area>.md and
-# they are merged here at integration.
-train = []
-deploy = []
-teleop = []
+# NOTE the PPU box does NOT uv-sync these — it overlays a borrowed venv via
+# envs/ppu-*.sh (see docs/environments.md for why).
+train = [
+    # openpi as a library from the pinned submodule; jax & friends come from
+    # its own dependency tree (jax must stay at openpi's pin — 0.10 breaks
+    # its flax scan)
+    "openpi",
+]
+deploy = [
+    "unitree_deploy",
+    # not on PyPI — Unitree's DDS bindings
+    "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python",
+    "pin",      # pinocchio: gravity-comp rnea in unitree_deploy
+    "casadi",   # only unitree_deploy's own IK path; we use mink
+    "opencv-python",
+    "pyzmq",    # robot image_server client
+]
+teleop = [
+    "vuer",
+    "televuer",
+]
 dev = ["pytest"]
+
+[tool.uv.sources]
+openpi = { path = "third_party/openpi", editable = true }
+unitree_deploy = { path = "third_party/unitree_deploy", editable = true }
 
 [build-system]
 requires = ["hatchling"]
