@@ -81,6 +81,36 @@ IK variant (when used) carries an explicit smoothness cost plus a 4-tap weighted
 moving filter. Their 500 Hz interpolator would track our zig-zag just as
 faithfully as ours did — the executor was never the differentiator.
 
+## How Unitree solves the same problem (xr_teleoperate)
+
+Unitree's own VR teleop faces the identical noisy-EEF→IK problem and answers it
+inside the solver (`xr_teleoperate/teleop/robot_control/robot_arm_ik.py`):
+
+```
+minimize( 50·translation + 1·rotation + 0.02·‖q‖² + 0.1·‖q − q_last‖² )
+```
+
+plus the 4-tap WeightedMovingFilter on the solution. Three ideas: an explicit
+**temporal smoothness cost** anchored to the previous tick's solution (the
+optimizer itself trades accuracy against joint motion), **rotation tracked 50×
+looser than translation** (rotational noise is what the Jacobian amplifies
+worst), and posture regularization against null-space wander.
+
+The smoothness cost transplants directly into our mink IK: retarget the
+posture task to the previous solution each tick. Measured on the re-solve
+stage (worst-joint accel RMS, `resolve_smooth_cost=0.05`):
+
+| episode | raw s003 | re-solve, posture→nominal | re-solve + smooth cost | EEF cost (R mean/max) |
+|---|---|---|---|---|
+| episode_1 | 26.5 | 4.4 | **3.8** | 0.08 / 0.37 cm |
+| episode_2 (elbow at limit) | 24.6 | 15.9 | **7.4** | 0.16 / 1.68 cm |
+| episode_3 | 25.6 | 7.2 | **7.3** | 0.21 / 1.73 cm |
+
+episode_2 is the interesting row: when the elbow saturates at its joint limit
+the plain QP makes the wrist flail to compensate (214 rad/s² spike); the
+smooth cost damps exactly that. Down-weighting orientation further (0.3→0.15)
+bought little at this cost level and was left alone.
+
 ## What this repo does about it
 
 1. Extraction re-solves IK **after** label smoothing, so stored `arm_qpos` /
