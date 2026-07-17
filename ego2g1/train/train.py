@@ -221,7 +221,13 @@ def _save_best(
 
 def _load_stock_train_module():
     """Import scripts/train.py (not a package) for its init functions."""
-    path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "train.py"
+    path = (
+        pathlib.Path(__file__).resolve().parent.parent.parent
+        / "third_party"
+        / "openpi"
+        / "scripts"
+        / "train.py"
+    )
     spec = importlib.util.spec_from_file_location("openpi_scripts_train", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
