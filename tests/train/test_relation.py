@@ -600,6 +600,39 @@ def test_relation_config_validates_shapes():
         _config.EgoRelationTrainConfig(grasp_head=False, w_aux=0.2)
 
 
+def test_graphdef_is_stable_across_constructions():
+    """Two constructions of the same config must produce EQUAL nnx graphdefs.
+
+    init_train_state builds the model twice -- once under jax.eval_shape for the
+    shape tree, once under jit -- and nnx requires the graphdefs to match. They
+    are compared including STATIC fields, and `kernel_init` is one, so passing a
+    freshly built initializer (nnx.initializers.lecun_normal() returns a NEW
+    closure per call) makes two identical models compare unequal. The failure is
+    a multi-thousand-line graphdef diff whose only delta is a function's id, so
+    it is worth catching here rather than on a training box.
+    """
+    import flax.nnx as nnx
+
+    cfg = _cfg()
+    assert nnx.graphdef(cfg.create(jax.random.key(0))) == nnx.graphdef(
+        cfg.create(jax.random.key(0))
+    )
+
+
+def test_relation_target_norm_is_a_static_float():
+    """The encoder scale must come from config, never from the live param tree.
+
+    Reading it in __init__ was wrong three ways: it runs under jax.eval_shape
+    (tracers, float() raises), it runs before the weight loader (so the table is
+    random init, not pi05_base), and it must include gemma.Embedder.encode's
+    sqrt(embed_dim). Pin the arithmetic: a unit-RMS encoder output leaves with
+    exactly `relation_target_norm` L2.
+    """
+    model = _cfg(relation_target_norm=34.77).create(jax.random.key(0))
+    scale = np.asarray(model.relation_encoder.scale.value)
+    np.testing.assert_allclose(np.linalg.norm(scale), 34.77, rtol=1e-5)
+
+
 def test_legacy_config_hash_is_pinned():
     """Extracting the shared base must not change any existing checkpoint's
     norm-stats identity."""

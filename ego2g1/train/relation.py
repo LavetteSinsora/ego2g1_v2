@@ -33,6 +33,18 @@ import jax.numpy as jnp
 import openpi.shared.array_typing as at
 
 
+# Bound ONCE, at import. nnx stores `kernel_init` in the graphdef's STATIC
+# fields, which are compared by object identity -- and `lecun_normal()` returns a
+# freshly built closure on every call. Constructing it inline would therefore make
+# two otherwise identical models compare unequal, and `init_train_state` builds
+# the model twice (once under jax.eval_shape, once under jit) and requires the two
+# graphdefs to match. `zeros_init()` happens to return a module-level function and
+# is stable either way; both are hoisted so the rule is uniform rather than
+# depending on which initializer you happen to pick.
+_ZEROS_INIT = nnx.initializers.zeros_init()
+_LECUN_NORMAL = nnx.initializers.lecun_normal()
+
+
 class GeGLU(nnx.Module):
     """Gated linear unit with a GELU gate -- Gemma's FFN nonlinearity.
 
@@ -48,7 +60,7 @@ class GeGLU(nnx.Module):
         self.value = nnx.Linear(in_features, hidden, rngs=rngs)
         # Zero-init means the whole module outputs exactly 0 at step 0 (see
         # safeguard 3). Bias is zero by nnx default, so no separate handling.
-        out_kernel = nnx.initializers.zeros_init() if zero_init_out else nnx.initializers.lecun_normal()
+        out_kernel = _ZEROS_INIT if zero_init_out else _LECUN_NORMAL
         self.out = nnx.Linear(hidden, out_features, kernel_init=out_kernel, rngs=rngs)
 
     def __call__(self, x):
