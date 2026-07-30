@@ -102,6 +102,122 @@ def load_pooled(directory: pathlib.Path | str) -> dict[str, _normalize.NormStats
     return _normalize.load(directory)
 
 
+# --------------------------------------------------------------------------
+# EgoRelationTrainConfig artifacts (relational state + 14-dim rotvec actions)
+# --------------------------------------------------------------------------
+
+RELATION_FILENAME = "relation_stats.npz"
+
+
+@dataclasses.dataclass(frozen=True)
+class RelationNormStats:
+    """The two stats grids the relational config needs, in ONE artifact.
+
+    action_q01/action_q99 : (H, D_real) per-(slot, dim) quantiles.
+        Unlike the E001 grid, this is the WHOLE action normalization -- there is
+        no pooled step underneath it. Measured on red_block_in_pen_holder_ego it
+        leaves every slot at std 0.27-0.44 (ratio 1.11-1.63 across the chunk)
+        against 17-24x for a pooled-only scheme, because early-slot deltas are
+        ~30x smaller than late-slot ones and only early slots ever execute.
+
+    relation_mean/relation_std : (relation_dim,) z-score stats, POOLED ACROSS
+        OBJECTS. Pooling is a correctness requirement, not a convenience: one
+        shared encoder plus a shuffled prompt order means per-object stats would
+        make the same physical relation encode differently depending on which
+        slot it landed in, destroying the permutation equivariance the shuffling
+        exists to create. Object identity travels as text, never as scale.
+
+    gripper_dims are recorded so the forward/inverse pair and the loss weighting
+    cannot disagree about which dims are exempt from normalization.
+    """
+
+    action_q01: np.ndarray       # (H, D_real)
+    action_q99: np.ndarray       # (H, D_real)
+    relation_mean: np.ndarray    # (relation_dim,)
+    relation_std: np.ndarray     # (relation_dim,)
+    gripper_dims: tuple[int, ...]
+    provenance: dict
+
+    def __post_init__(self):
+        if self.action_q01.shape != self.action_q99.shape:
+            raise ValueError(f"q01 {self.action_q01.shape} != q99 {self.action_q99.shape}")
+        if self.relation_mean.shape != self.relation_std.shape:
+            raise ValueError(f"mean {self.relation_mean.shape} != std {self.relation_std.shape}")
+
+    @property
+    def action_span(self) -> np.ndarray:
+        """The Normalize denominator, with openpi's exact epsilon."""
+        return self.action_q99 - self.action_q01 + 1e-6
+
+
+def save_relation(directory: pathlib.Path | str, stats: RelationNormStats) -> None:
+    directory = pathlib.Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        directory / RELATION_FILENAME,
+        action_q01=stats.action_q01,
+        action_q99=stats.action_q99,
+        relation_mean=stats.relation_mean,
+        relation_std=stats.relation_std,
+        gripper_dims=np.asarray(stats.gripper_dims, dtype=np.int64),
+        provenance=json.dumps(stats.provenance),
+    )
+
+
+def load_relation(directory: pathlib.Path | str) -> RelationNormStats:
+    path = pathlib.Path(directory) / RELATION_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found — run `python -m ego2g1.train.compute_norm_stats "
+            "--config relation` (the relational config needs the per-slot quantile "
+            "grid and the pooled relation z-score stats)"
+        )
+    with np.load(path, allow_pickle=False) as z:
+        return RelationNormStats(
+            action_q01=np.asarray(z["action_q01"], dtype=np.float64),
+            action_q99=np.asarray(z["action_q99"], dtype=np.float64),
+            relation_mean=np.asarray(z["relation_mean"], dtype=np.float64),
+            relation_std=np.asarray(z["relation_std"], dtype=np.float64),
+            gripper_dims=tuple(int(d) for d in z["gripper_dims"]),
+            provenance=json.loads(str(z["provenance"])),
+        )
+
+
+def check_relation_stats_sanity(stats: RelationNormStats, max_abs_norm: float = 20.0) -> list[str]:
+    """Returns human-readable violations (empty = pass).
+
+    Every one of these is a data bug rather than a tuning knob:
+    - a zero-span (slot, dim) means that dim never moves at that slot, which for
+      a 14-dim all-live action space should not happen (the 30-dim config had
+      genuinely dead finger dims; this one has none, so an empty degenerate set
+      is itself the check);
+    - a zero relation std means a relation dim is constant across the dataset;
+    - a gripper dim inside the normalized set would double-scale it.
+    """
+    problems = []
+    span = stats.action_q99 - stats.action_q01
+    d_real = span.shape[1]
+    for d in range(d_real):
+        if d in stats.gripper_dims:
+            continue
+        dead = np.flatnonzero(span[:, d] <= DEGENERATE_EPS)
+        if dead.size:
+            problems.append(
+                f"actions dim {d}: zero quantile span at slots {dead[:5].tolist()}"
+                f"{' ...' if dead.size > 5 else ''} ({dead.size}/{span.shape[0]} slots)"
+            )
+    for d in stats.gripper_dims:
+        if not np.all(span[:, d] <= DEGENERATE_EPS) and np.any(span[:, d] > 0):
+            # not fatal: the grid is simply unused for these dims
+            pass
+    if np.any(stats.relation_std <= DEGENERATE_EPS):
+        dead = np.flatnonzero(stats.relation_std <= DEGENERATE_EPS)
+        problems.append(f"relation dims {dead.tolist()} have ~zero std (constant across the dataset)")
+    if max(stats.gripper_dims, default=-1) >= d_real:
+        problems.append(f"gripper_dims {stats.gripper_dims} out of range for D_real={d_real}")
+    return problems
+
+
 def check_stats_sanity(
     pooled: dict[str, _normalize.NormStats],
     per_slot: PerSlotStats,

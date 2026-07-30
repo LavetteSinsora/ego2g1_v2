@@ -33,8 +33,15 @@ import openpi.models.pi0_config as _pi0_config
 from openpi.shared import array_typing as at
 
 from ego2g1.train import gemma_patch
+from ego2g1.train import observation_patch
+from ego2g1.train import relation as _relation
 
 gemma_patch.apply()
+# Rebinds model.Observation / model.preprocess_observation so the relational
+# config's per-object relation matrix can reach embed_prefix. A no-op for the
+# 30-dim config (relations stays None and every path short-circuits), and
+# applied unconditionally so a checkpoint cannot be loaded by code that lacks it.
+observation_patch.apply()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,10 +56,39 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
     # E003 placeholder — gated on profiling evidence, only 1 is implemented.
     num_flow_samples: int = 1
 
+    # --- relational state (EgoRelationTrainConfig); 0 objects = disabled ---
+    # Number of objects whose relation vector is injected as a prompt token.
+    n_objects: int = 0
+    relation_dim: int = 18          # per object: one vec9 per hand
+    relation_hidden: int = 512      # GeGLU hidden width
+    grasp_head: bool = False        # auxiliary per-slot grasp-probability head
+    # Width of the `state` field BEFORE PadStatesAndActions. Informational: the
+    # padded width the model actually sees is action_dim, which is what stock
+    # inputs_spec already declares, so no spec override is needed for it.
+    state_dim: int = 0
+    # Vocabulary id of RELATION_SENTINEL ("<unused0>"). Hard-coded rather than
+    # resolved from the tokenizer so constructing a model config never triggers a
+    # tokenizer download; tests/train/test_relation_transforms.py asserts the
+    # tokenizer really maps the sentinel to this id.
+    relation_sentinel_id: int = 7
+    # Per-dim loss weights over the D_real action dims, mean 1. None = uniform.
+    # A tuple (not an array) so the frozen dataclass stays hashable.
+    loss_dim_weights: tuple[float, ...] | None = None
+
     def __post_init__(self):
         super().__post_init__()
         if self.num_flow_samples != 1:
             raise NotImplementedError("E003 (num_flow_samples > 1) is gated on profiling; see OPENPI_EDITS.md")
+        if self.n_objects and not self.pi05:
+            raise ValueError("relation-token injection is implemented for the pi05 prefix only")
+        if self.grasp_head and not self.n_objects:
+            raise ValueError("grasp_head is part of the relational config; it needs n_objects > 0")
+        if self.loss_dim_weights is not None:
+            n = self.action_dim_actual or self.action_dim
+            if len(self.loss_dim_weights) != n:
+                raise ValueError(
+                    f"loss_dim_weights has {len(self.loss_dim_weights)} entries, expected {n}"
+                )
         if self.rtc_training:
             if not self.pi05:
                 raise ValueError("train-time RTC needs per-token adaRMS, i.e. the pi05 path")
@@ -65,14 +101,39 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
     def create(self, rng: at.KeyArrayLike) -> "Ego2G1Pi0":
         return Ego2G1Pi0(self, rngs=nnx.Rngs(rng))
 
+    @override
+    def inputs_spec(self, *, batch_size: int = 1):
+        """Stock spec plus the `relations` field.
+
+        `state` needs no override: PadStatesAndActions widens it to action_dim
+        before it reaches the model, which is exactly what stock declares. Only
+        the new field has to be added, or `init` would build the relation encoder
+        against a missing input and the first real batch would shape-mismatch.
+        """
+        obs_spec, action_spec = super().inputs_spec(batch_size=batch_size)
+        if self.n_objects:
+            with at.disable_typechecking():
+                obs_spec = dataclasses.replace(
+                    obs_spec,
+                    relations=jax.ShapeDtypeStruct(
+                        [batch_size, self.n_objects, self.relation_dim], jnp.float32
+                    ),
+                )
+        return obs_spec, action_spec
+
     def feature_flags(self) -> dict:
         """Model-side checkpoint flags (ego2g1.stamp adds data-side ones)."""
-        return {
+        flags = {
             # informational: loss-only, no serving-side requirement
             "action_dim_actual": self.action_dim_actual,
             # informational: an RTC-trained checkpoint degrades gracefully to d=0
             "rtc_training": self.rtc_training,
         }
+        if self.n_objects:
+            flags["n_objects"] = self.n_objects
+            flags["relation_hidden"] = self.relation_hidden
+            flags["relation_sentinel_id"] = self.relation_sentinel_id
+        return flags
 
 
 class Ego2G1Pi0(_pi0.Pi0):
@@ -81,6 +142,167 @@ class Ego2G1Pi0(_pi0.Pi0):
         self.action_dim_actual = config.action_dim_actual
         self.rtc_training = config.rtc_training
         self.rtc_d_max = config.rtc_d_max
+        self.n_objects = config.n_objects
+        self.relation_sentinel_id = config.relation_sentinel_id
+        self.loss_dim_weights = config.loss_dim_weights
+
+        # Built only for the relational config, so the 30-dim config's param tree
+        # stays exactly stock-shaped (tests/train/test_model.py pins that).
+        self.relation_encoder = None
+        self.grasp_head = None
+        if config.n_objects:
+            self.relation_encoder = _relation.RelationEncoder(
+                config.relation_dim,
+                config.relation_hidden,
+                self.PaliGemma.llm.module.configs[0].width,
+                rngs=rngs,
+                # Match the pretrained embedding table's magnitude so the injected
+                # token starts life the size of a real word (safeguard 2 in
+                # ego2g1/train/relation.py). Read from the live table, so it stays
+                # right if the pretrained checkpoint changes.
+                target_norm=_relation.paligemma_embedding_norm(self.PaliGemma.llm),
+            )
+        if config.grasp_head:
+            self.grasp_head = _relation.GraspHead(
+                self.PaliGemma.llm.module.configs[0].width,
+                config.action_horizon,
+                # one logit per hand; the relational action space is 7 dims/hand
+                n_hands=max(1, (config.action_dim_actual or 14) // 7),
+                rngs=rngs,
+            )
+
+    # ------------------------------------------------------------------ prefix
+
+    @override
+    def embed_prefix(self, obs):
+        """Stock prefix, with relation embeddings ADDED at the sentinel slots.
+
+        Two deliberate choices:
+
+        Substitution position, not insertion. The prompt already carries one
+        reserved token per object, so the prefix LENGTH, the input mask and the
+        ar_mask are all bit-identical to stock and no attention plumbing changes.
+        That is the whole reason for a reserved vocabulary id over appended tokens.
+
+        RESIDUAL, not overwrite. Writing the encoder output over the sentinel's
+        embedding would, at zero-init, put an exactly-zero vector at that position
+        -- and a zero embedding is just as out-of-distribution for the pretrained
+        VLM as an oversized one (real token embeddings here have norm ~0.77). Added
+        instead, zero-init means the prefix at step 0 is EXACTLY the plain-text
+        prompt including `<unused0>`'s own pretrained embedding, so the model
+        starts fully in distribution and learns a delta on top of a real token.
+
+        Stock concatenates [image tokens ..., text tokens], so the text region is
+        the LAST tokenized_prompt.shape[1] positions -- read from there rather than
+        recomputing the SigLIP token count, which would duplicate an assumption
+        already encoded upstream.
+        """
+        tokens, input_mask, ar_mask = super().embed_prefix(obs)
+        relations = getattr(obs, "relations", None)
+        if self.relation_encoder is None or relations is None or obs.tokenized_prompt is None:
+            return tokens, input_mask, ar_mask
+
+        length = obs.tokenized_prompt.shape[1]
+        text = tokens[:, -length:, :]
+        rel = self.relation_encoder(relations)                       # (b, n, emb)
+
+        slot = obs.tokenized_prompt == self.relation_sentinel_id      # (b, l)
+        # The k-th sentinel gets the k-th relation row. cumsum-1 gives that rank;
+        # non-slot positions get a meaningless rank but are zeroed out below.
+        rank = jnp.cumsum(slot, axis=1) - 1
+        rank = jnp.clip(rank, 0, rel.shape[1] - 1)
+        idx = jnp.broadcast_to(rank[..., None], (*rank.shape, rel.shape[-1]))
+        gathered = jnp.take_along_axis(rel, idx, axis=1)              # (b, l, emb)
+
+        delta = jnp.where(slot[..., None], gathered.astype(text.dtype), 0.0)
+        return jnp.concatenate([tokens[:, :-length, :], text + delta], axis=1), input_mask, ar_mask
+
+    # -------------------------------------------------------------------- loss
+
+    def _reduce_dims(self, loss):
+        """Slice to the real dims, then reduce with the per-dim weights.
+
+        Weights have mean 1 by construction, so `mean(loss * w)` keeps the loss on
+        the same scale as the unweighted reduction and the number stays comparable
+        across weightings.
+        """
+        if self.action_dim_actual is not None:
+            loss = loss[..., : self.action_dim_actual]
+        if self.loss_dim_weights is not None:
+            w = jnp.asarray(self.loss_dim_weights, dtype=loss.dtype)
+            return jnp.mean(loss * w, axis=-1)
+        return jnp.mean(loss, axis=-1)
+
+    @at.typecheck
+    def compute_loss_with_aux(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        gripper_dims: tuple[int, ...] = (),
+    ) -> tuple[at.Float[at.Array, "*b ah"], dict]:
+        """Flow loss (dim-weighted) + auxiliary grasp BCE, from ONE forward pass.
+
+        Kept separate from `compute_loss` rather than folded into it: the
+        golden-identity tests in tests/train/test_model.py pin `compute_loss` to
+        stock numerics, and running the aux head needs the prefix hidden states
+        that stock discards. The body below mirrors `compute_loss`'s, with the
+        prefix output captured and the reduction weighted.
+        """
+        if self.relation_encoder is None and self.grasp_head is None and self.loss_dim_weights is None:
+            return self.compute_loss(rng, observation, actions, train=train), {}
+
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+
+        batch_shape = actions.shape[:-2]
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        prefix_tokens, prefix_mask_tokens, prefix_ar_mask = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask_tokens, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = _pi0.make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions,
+            adarms_cond=[None, adarms_cond],
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        chunked_loss = self._reduce_dims(jnp.square(v_t - u_t))
+
+        aux: dict = {}
+        if self.grasp_head is not None and gripper_dims:
+            logits = self.grasp_head(prefix_out, prefix_mask_tokens)      # (b, ah, nh)
+            targets = actions[..., list(gripper_dims)]                    # (b, ah, nh)
+            aux["grasp_bce"] = _relation.grasp_bce_loss(logits, targets)
+            aux["grasp_logits"] = logits
+            aux["grasp_targets"] = targets
+        if self.relation_encoder is not None and getattr(observation, "relations", None) is not None:
+            # Injection canary (safeguards 2 and 3 in ego2g1/train/relation.py):
+            # the magnitude of the DELTA the encoder adds, against the magnitude of
+            # a real text-token embedding. Ratio O(1) is healthy; orders apart means
+            # the encoder is either being ignored or drowning the prompt.
+            #
+            # Measured from the encoder output directly rather than from the summed
+            # prefix, so it reports the delta and not text+delta -- otherwise the
+            # ratio would read ~1 even for an encoder that does nothing.
+            length = observation.tokenized_prompt.shape[1]
+            slot = observation.tokenized_prompt == self.relation_sentinel_id
+            real = observation.tokenized_prompt_mask & ~slot
+            text_norms = jnp.linalg.norm(prefix_tokens[:, -length:, :].astype(jnp.float32), axis=-1)
+            aux["injected_norm"] = jnp.mean(
+                jnp.linalg.norm(self.relation_encoder(observation.relations).astype(jnp.float32), axis=-1)
+            )
+            aux["text_norm"] = jnp.sum(jnp.where(real, text_norms, 0.0)) / jnp.maximum(jnp.sum(real), 1.0)
+        return chunked_loss, aux
 
     @at.typecheck
     def embed_suffix(

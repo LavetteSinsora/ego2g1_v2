@@ -145,12 +145,113 @@ def digit_token_ids() -> np.ndarray:
     )
 
 
+def relation_segment_masks(
+    obs: _model.Observation,
+    *,
+    object_prompt_names: tuple[str, ...],
+    sentinel_id: int,
+    tokenizer=None,
+) -> dict[str, np.ndarray]:
+    """Per-sample (B, L) boolean masks over the prompt, one per relational segment.
+
+    Segments: `text/task` (everything up to "Left hand:"), `text/hand_left`,
+    `text/hand_right`, `text/obj_names`, `text/obj_vectors` (the injection
+    sentinels), and one `text/obj_vec/<name>` per object.
+
+    Recovered from the token ids themselves rather than threaded through the
+    Observation: the sentinel is an exact id match, and the coarse boundaries come
+    from a piece-level scan for the segment keywords. The old `digit_token_ids`
+    approach cannot work here -- there are no digits in this prompt, and the
+    relation vectors are not vocabulary items at all.
+
+    Per-object attribution uses the name that PRECEDES each sentinel, so it
+    follows the shuffled order correctly on every sample.
+
+    Every expected segment must be found exactly once per sample; a missing one
+    raises rather than silently attributing its mass elsewhere.
+    """
+    sp = (tokenizer or _paligemma_tokenizer.PaligemmaTokenizer(48))._tokenizer  # noqa: SLF001
+    ids = np.asarray(obs.tokenized_prompt)
+    valid = (
+        np.asarray(obs.tokenized_prompt_mask).astype(bool)
+        if obs.tokenized_prompt_mask is not None
+        else np.ones(ids.shape, bool)
+    )
+    b, length = ids.shape
+
+    names = ["text/task", "text/hand_left", "text/hand_right", "text/obj_names", "text/obj_vectors"]
+    names += [f"text/obj_vec/{n.replace(' ', '_')}" for n in object_prompt_names]
+    masks = {n: np.zeros((b, length), np.float32) for n in names}
+
+    for i in range(b):
+        pieces = [sp.id_to_piece(int(t)).replace("▁", " ") for t in ids[i]]
+        text = "".join(pieces)
+        # character offset of each token, so a substring match maps back to tokens
+        offs, pos = [], 0
+        for p in pieces:
+            offs.append(pos)
+            pos += len(p)
+        ends = [offs[j] + len(pieces[j]) for j in range(length)]
+
+        def tok_at(char: int) -> int:
+            """Index of the token CONTAINING this character offset.
+
+            Boundaries are converted to token indices this way rather than
+            comparing token start offsets, because sentencepiece pieces carry a
+            leading space (" Left"), so the token holding a keyword starts one
+            character before the keyword does. Comparing starts would attribute
+            every boundary word to the preceding segment.
+            """
+            for j in range(length):
+                if ends[j] > char:
+                    return j
+            return length
+
+        def span(lo: int, hi: int):
+            j0, j1 = tok_at(lo), tok_at(hi)
+            return np.array([valid[i, j] and j0 <= j < j1 for j in range(length)], bool)
+
+        i_left = text.find("Left hand:")
+        i_right = text.find("Right hand:")
+        i_obj = text.find("Objects:")
+        i_act = text.rfind("Action:")
+        if min(i_left, i_right, i_act) < 0:
+            raise ValueError(f"probe prompt is missing a segment keyword: {text!r}")
+        end_hands = i_obj if i_obj >= 0 else i_act
+
+        masks["text/task"][i] = span(0, i_left)
+        masks["text/hand_left"][i] = span(i_left, i_right)
+        masks["text/hand_right"][i] = span(i_right, end_hands)
+
+        sentinels = np.flatnonzero((ids[i] == sentinel_id) & valid[i])
+        masks["text/obj_vectors"][i] = (ids[i] == sentinel_id) & valid[i]
+        if i_obj >= 0:
+            names_mask = span(i_obj, i_act) & ~((ids[i] == sentinel_id))
+            masks["text/obj_names"][i] = names_mask
+            # attribute each sentinel to the object name that precedes it
+            for s in sentinels:
+                before = text[i_obj:offs[s]]
+                match = [n for n in object_prompt_names if n in before]
+                if match:
+                    nearest = max(match, key=lambda n: before.rfind(n))
+                    masks[f"text/obj_vec/{nearest.replace(' ', '_')}"][i, s] = 1.0
+        elif sentinels.size:
+            raise ValueError("found injection sentinels but no `Objects:` segment")
+    return masks
+
+
 def token_groups(
-    model: _pi0.Pi0, obs: _model.Observation, *, state_token_ids: np.ndarray | None = None
+    model: _pi0.Pi0,
+    obs: _model.Observation,
+    *,
+    state_token_ids: np.ndarray | None = None,
+    segment_masks: dict[str, np.ndarray] | None = None,
 ) -> TokenGroups:
     """Groups matching embed_prefix's concatenation order (images in obs.images
     order, then text) + the action suffix. With `state_token_ids`, the text group
-    splits into text/task and text/state. Prompt PADDING belongs to no group —
+    splits into text/task and text/state; with `segment_masks` (see
+    `relation_segment_masks`), the text group splits into the supplied named
+    per-sample segments instead. Prompt PADDING belongs to no group —
     it is masked out of attention, so it carries ~0 mass and the groups still
     partition the attention simplex."""
     b = obs.state.shape[0]
@@ -197,7 +298,9 @@ def token_groups(
             if obs.tokenized_prompt_mask is not None
             else np.ones(ids.shape, bool)
         )
-        if state_token_ids is not None:
+        if segment_masks is not None:
+            text_groups = [(name, m.astype(bool) & valid) for name, m in segment_masks.items()]
+        elif state_token_ids is not None:
             is_state = np.isin(ids, state_token_ids) & valid
             text_groups = [("text/task", valid & ~is_state), ("text/state", is_state)]
         else:
@@ -232,6 +335,7 @@ def attention_allocation(
     time_value: float = 0.5,
     rng=None,
     state_token_ids: np.ndarray | None = None,
+    segment_masks: dict[str, np.ndarray] | None = None,
 ) -> dict:
     """Train-style joint forward at one flow timestep; returns where the
     action-token queries put their attention mass.
@@ -250,7 +354,7 @@ def attention_allocation(
     """
     rng = rng if rng is not None else jax.random.key(0)
     obs = _model.preprocess_observation(None, obs, train=False)
-    groups = token_groups(model, obs, state_token_ids=state_token_ids)
+    groups = token_groups(model, obs, state_token_ids=state_token_ids, segment_masks=segment_masks)
 
     noise = jax.random.normal(rng, actions.shape)
     t = jnp.full(actions.shape[0], time_value, dtype=jnp.float32)

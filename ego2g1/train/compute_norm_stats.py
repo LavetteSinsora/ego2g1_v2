@@ -134,5 +134,102 @@ def main(config: _config.Ego2G1TrainConfig, batch_size: int = 128):
         print(f"  {gain.max(axis=1)}")
 
 
+def main_relation(config: _config.EgoRelationTrainConfig):
+    """Stats for the relational config: per-(slot, dim) action quantiles + pooled
+    relation z-score stats, both over the TRAIN split only.
+
+    Reads parquet directly instead of iterating the LeRobot dataset. Neither
+    statistic depends on a pixel, so going through the dataset would decode ~19k
+    video frames to compute the same numbers; this way it is seconds.
+    """
+    from ego2g1.train import dataset as _ds
+
+    h = config.action_horizon
+    d_real = config.action_dim_actual
+    grip = config.gripper_dims
+
+    meta = _ds.assert_relation_dataset_compatible(
+        config.dataset_root, config.expected_config_hash, h, config.fps,
+        config.n_objects, config.hands,
+    )
+
+    print(f"Building relative action chunks from parquet (H={h}, D={d_real}) ...")
+    actions = _ds.relation_raw_action_chunks(config, h, split="train")   # (N, H, D)
+    relations = _ds.relation_raw_relations(config, split="train")        # (N*n_obj, rel_dim)
+    print(f"  actions {actions.shape}  relations {relations.shape}")
+
+    # Exact percentiles: (N, H, D) float64 is ~107 MB at this size, so there is
+    # no reason to approximate with a streaming estimator.
+    q01 = np.percentile(actions, 1, axis=0)
+    q99 = np.percentile(actions, 99, axis=0)
+
+    # What the model will actually see, so the loss weights are derived from the
+    # real distribution rather than a Gaussian assumption.
+    span = q99 - q01 + 1e-6
+    normalized = 2.0 * (actions - q01) / span - 1.0
+    if config.model_space_clamp is not None:
+        normalized = np.clip(normalized, -config.model_space_clamp, config.model_space_clamp)
+    normalized[..., list(grip)] = actions[..., list(grip)]   # grippers pass through at +-1
+    model_space_variance = normalized.reshape(-1, d_real).var(axis=0)
+
+    stats = _norm.RelationNormStats(
+        action_q01=q01,
+        action_q99=q99,
+        relation_mean=relations.mean(axis=0),
+        relation_std=relations.std(axis=0),
+        gripper_dims=grip,
+        provenance={
+            "extraction_config_hash": meta["config_hash"],
+            "ego2g1_config_hash": config.config_hash(),
+            "num_chunks": int(actions.shape[0]),
+            "num_relation_rows": int(relations.shape[0]),
+            "val_source_episodes": list(config.val_source_episodes),
+            "action_norm_scheme": config.action_norm_scheme,
+            "model_space_variance": model_space_variance.tolist(),
+            "gripper_closed_fraction": [
+                float((actions[..., d] > 0).mean()) for d in grip
+            ],
+        },
+    )
+
+    problems = _norm.check_relation_stats_sanity(stats)
+    if problems:
+        raise SystemExit("Stats sanity check FAILED:\n  " + "\n  ".join(problems))
+
+    output_dir = config.assets_dirs / config.repo_id
+    print(f"Writing {_norm.RELATION_FILENAME} to: {output_dir}")
+    _norm.save_relation(output_dir, stats)
+
+    # ------------------------------------------------------------------ report
+    from ego2g1.train import data_config as _dc
+
+    w = _dc.loss_dim_weights(stats, d_real, grip, config.w_gripper)
+    labels = [f"{s}_{a}" for s in ("L", "R") for a in ("dx", "dy", "dz", "rx", "ry", "rz")]
+    labels += [f"{s}_grip" for s in ("L", "R")]
+    with np.printoptions(precision=4, suppress=True, linewidth=200):
+        print(f"\nmodel-space std per slot (target: uniform; a pooled scheme gives 17-24x spread):")
+        for k in (0, 1, 9, 24, h - 1):
+            print(f"  slot {k:2d}: {normalized[:, k, :].std(axis=0)}")
+        print(f"\nmax |normalized| on non-gripper dims: "
+              f"{np.abs(np.delete(normalized, list(grip), axis=-1)).max():.2f} "
+              f"(clamp {config.model_space_clamp})")
+        print(f"\nrelation z-score gains (1/std): {1.0 / np.maximum(stats.relation_std, 1e-9)}")
+        print(f"relation |z|>{config.state_norm_clip} fraction: "
+              f"{float((np.abs((relations - stats.relation_mean) / stats.relation_std) > config.state_norm_clip).mean()) * 100:.4f}%")
+    print(f"\nloss_dim_weights (w_gripper={config.w_gripper}, mean 1):")
+    for name, wi, v in zip(labels, w, model_space_variance, strict=True):
+        print(f"  {name:>7s}  Var(x1)={v:7.4f}  Var(u)={1 + v:7.4f}  w={wi:7.4f}")
+    tot = sum(wi * (1 + v) for wi, v in zip(w, model_space_variance, strict=True))
+    gshare = sum(w[d] * (1 + model_space_variance[d]) for d in grip) / tot
+    print(f"  -> gripper share of weighted MSE: {gshare * 100:.2f}% "
+          f"(intent {2 * config.w_gripper / (12 + 2 * config.w_gripper) * 100:.2f}%)")
+
+
 if __name__ == "__main__":
-    main(tyro.cli(_config.Ego2G1TrainConfig))
+    import sys
+
+    if "--relation" in sys.argv:
+        sys.argv.remove("--relation")
+        main_relation(tyro.cli(_config.EgoRelationTrainConfig))
+    else:
+        main(tyro.cli(_config.Ego2G1TrainConfig))

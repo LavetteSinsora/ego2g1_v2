@@ -186,3 +186,148 @@ def create_data_config(
         use_quantile_norm=True,  # pi05
         prompt_from_task=True,
     )
+
+
+# --------------------------------------------------------------------------
+# EgoRelationTrainConfig stack
+# --------------------------------------------------------------------------
+
+
+def loss_dim_weights(stats, action_dim_actual: int, gripper_dims, w_gripper: float) -> tuple[float, ...]:
+    """Per-dim flow-loss weights: variance-normalize first, THEN apply w_gripper.
+
+    Why the two stages must be separate. The flow target is u = noise - x1, so
+    Var(u_d) = 1 + Var(x1_d). With grippers left raw at +-1 and EEF dims quantile
+    normalized to std ~0.32, that is 1.83 vs 1.10 -- so an UNWEIGHTED MSE already
+    hands the 2 gripper dims 21.6% of the loss, not 2/14 = 14.3%. Multiplying by a
+    bare 3 on top of that would land at 58%, not the intended 33%.
+
+    Stage 1 (1/Var(u_d)) puts every dim on equal footing. Stage 2 (w_gripper on the
+    gripper dims) is then a statement about task importance whose meaning does not
+    move when the normalization scheme changes: w_gripper=3 gives the grippers
+    2*3/(12+2*3) = 33% of the loss, and would still mean "worth 3 EEF dims each"
+    under the pooled_floored_gain scheme.
+
+    Normalized to mean 1 so the reported loss stays on the same scale as an
+    unweighted run and remains comparable across weightings.
+    """
+    import numpy as np
+
+    var = stats.provenance.get("model_space_variance")
+    if var is None:
+        raise ValueError(
+            "relation_stats.npz carries no `model_space_variance` in its provenance; "
+            "re-run `python -m ego2g1.train.compute_norm_stats --config relation` with "
+            "this code version (the loss weights are derived from it, and guessing it "
+            "would silently change what w_gripper means)"
+        )
+    var = np.asarray(var, dtype=np.float64)[:action_dim_actual]
+    w = 1.0 / (1.0 + var)
+    w[list(gripper_dims)] *= w_gripper
+    w = w / w.mean()
+    return tuple(float(x) for x in w)
+
+
+def create_relation_data_config(
+    train_config,
+    model_config,
+    *,
+    stats_dir: pathlib.Path | str,
+    skip_norm_stats: bool = False,
+    shuffle_objects: bool | None = None,
+    swap_relations: bool = False,
+    include_objects: bool = True,
+) -> _config.DataConfig:
+    """Assemble the relational DataConfig.
+
+    Placement notes, all load-bearing:
+
+    - `norm_stats={}` makes openpi's mandatory `Normalize` step a NO-OP. It is
+      inserted unconditionally by `transform_dataset` and cannot be removed
+      without forking that function; an empty dict is the supported way to opt
+      out, because Normalize only touches keys present in the stats. Both of our
+      normalizations are per-(slot, dim) or pooled-across-objects and cannot be
+      expressed in openpi's per-dim NormStats anyway.
+    - Both normalizers live in `model_transforms`, so `compute_norm_stats` --
+      which applies repack + data_transforms only -- observes RAW actions and RAW
+      relations, which is exactly what it must measure.
+    - `RelationPrompt` owns both the object order and the relation row order, so
+      the name->vector pairing cannot be broken by a later edit to one of them.
+
+    `shuffle_objects` overrides the config default: train shuffles, val does not
+    (a fixed order keeps the val curve comparable across steps).
+    """
+    from ego2g1.train import norm as _norm
+    from ego2g1.train import relation_transforms as _rt
+
+    stats_dir = pathlib.Path(stats_dir)
+    shuffle = train_config.shuffle_object_order if shuffle_objects is None else shuffle_objects
+
+    model_inputs = []
+    model_outputs = []
+    if not skip_norm_stats:
+        stats = _norm.load_relation(stats_dir)
+        d_real = train_config.action_dim_actual
+        model_inputs.append(_rt.NormalizeRelations(
+            mean=stats.relation_mean, std=stats.relation_std, clip=train_config.state_norm_clip,
+        ))
+        if train_config.action_norm_scheme != "per_slot_quantile":
+            raise NotImplementedError(
+                f"action_norm_scheme={train_config.action_norm_scheme!r} is declared in the config "
+                "and its stats artifact exists, but only 'per_slot_quantile' is wired here yet"
+            )
+        model_inputs.append(_rt.PerSlotQuantizeActions(
+            q01=stats.action_q01[:, :d_real], q99=stats.action_q99[:, :d_real],
+            gripper_dims=train_config.gripper_dims, clamp=train_config.model_space_clamp,
+        ))
+        model_outputs.append(_rt.PerSlotQuantizeActionsInverse(
+            q01=stats.action_q01[:, :d_real], q99=stats.action_q99[:, :d_real],
+            gripper_dims=train_config.gripper_dims,
+        ))
+
+    model_inputs += [
+        _transforms.ResizeImages(224, 224),
+        _rt.RelationTokenizePrompt(max_token_len=model_config.max_token_len),
+        _transforms.PadStatesAndActions(model_config.action_dim),
+    ]
+
+    data_transforms = _transforms.Group(
+        inputs=[
+            _rt.RelativeEEFRotvecActions(hands=tuple(train_config.hands)),
+            _rt.RelationPrompt(
+                object_prompt_names=tuple(train_config.object_prompt_names),
+                hands=tuple(train_config.hands),
+                shuffle=shuffle,
+                control_mode=train_config.control_mode,
+                swap_relations=swap_relations,
+                include_objects=include_objects,
+            ),
+            _rt.RelationInputs(model_type=model_config.model_type),
+        ],
+        outputs=[_rt.RelationOutputs(action_dim=train_config.action_dim_actual)],
+    )
+
+    # Dataset-only: rename the dotted LeRobot feature keys to the slash-form the
+    # transforms use. Never runs at inference (the robot client sends slash keys).
+    repack_transforms = _transforms.Group(
+        inputs=[
+            _transforms.RepackTransform({
+                "observation/image": "observation.images.camera0",
+                "observation/state": "observation.state",
+                "observation/action_reference_tcp": "observation.action_reference_tcp",
+                "action": "action",
+                "prompt": "prompt",
+            })
+        ]
+    )
+
+    return _config.DataConfig(
+        repo_id=train_config.repo_id,
+        asset_id=train_config.repo_id,
+        norm_stats={},   # see docstring: makes openpi's Normalize a no-op
+        repack_transforms=repack_transforms,
+        data_transforms=data_transforms,
+        model_transforms=_transforms.Group(inputs=model_inputs, outputs=model_outputs),
+        use_quantile_norm=True,
+        prompt_from_task=True,
+    )

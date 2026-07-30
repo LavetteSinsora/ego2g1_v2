@@ -17,6 +17,7 @@ STAMP_FILENAME = "ego2g1_stamp.json"
 # Features this codebase knows how to serve. A checkpoint requiring anything
 # outside this set (e.g. from a newer ego2g1) must be refused.
 SUPPORTED_FEATURES = frozenset({
+    # --- Ego2G1TrainConfig: 30-dim absolute-EEF-6d + Revo2 motor commands ---
     "per_slot_rescale",
     "per_slot_center",
     "degenerate_neutralization",
@@ -26,6 +27,18 @@ SUPPORTED_FEATURES = frozenset({
     "action_dim_actual",
     "rtc_training",
     "state_masking",
+    # --- EgoRelationTrainConfig: relational state + 14-dim rotvec actions ---
+    # which action normalization must be inverted at serving time
+    "action_norm_scheme",
+    # object-relation vectors z-scored and injected as prompt tokens
+    "relation_state",
+    # relative EEF with ROTATION-VECTOR rotation (not 6d)
+    "relative_eef_rotvec_actions",
+    # binary open/closed gripper dims that deploy must expand to hand commands
+    "binary_gripper",
+    # informational
+    "loss_gripper_weight",
+    "grasp_head",
 })
 
 
