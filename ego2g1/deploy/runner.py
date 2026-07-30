@@ -28,6 +28,11 @@ Live entry point (see docs/deploy.md for the full rung ladder first):
     python -m ego2g1.deploy.runner --host <serve-box> --port 8000 \
         --prompt "put the bottle in the box" --mode sync
 
+With `--dashboard` the start is GATED: the loop launches idle (holding) and the
+web page's Start/Pause/Record/Reset/E-STOP buttons drive the lifecycle
+(begin/pause/record_toggle/reset_to_episode/estop below); `--ungated` restores
+the terminal Enter-to-start. `--dataset <lerobot root>` arms reset-to-episode.
+
 Dry run, no robot, no camera (mock executor; needs only the policy server):
 
     python -m ego2g1.deploy.runner --host 127.0.0.1 --prompt "x" --dry-run
@@ -37,6 +42,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import threading
 import time
 
 import numpy as np
@@ -71,6 +77,7 @@ class DeployRunner:
     def __init__(self, *, adapter, strategy, executor, camera=None,
                  recorder=None, limits: _safety.SafetyLimits | None = None,
                  fps: int = 30, max_steps: int = 10_000_000,
+                 gated: bool = False, dataset: str | None = None,
                  clock=time.monotonic, wait=precise_wait):
         self.adapter = adapter
         self.strategy = strategy
@@ -81,6 +88,7 @@ class DeployRunner:
         self.fps = int(fps)
         self.dt = 1.0 / self.fps
         self.max_steps = int(max_steps)
+        self.dataset = dataset     # lerobot dataset root; enables reset_to_episode
         self._clock = clock
         self._wait = wait
 
@@ -91,6 +99,12 @@ class DeployRunner:
         self.last_hands = {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS}
         self.steps_executed = 0
         self.running = False       # set/cleared around run(); read by telemetry()
+        # Gate between idle (holding pose) and active (observe->infer->pop).
+        # `gated` launches idle: the dashboard's Start button calls begin().
+        self._active = threading.Event()
+        if not gated:
+            self._active.set()
+        self._ctrl_lock = threading.Lock()   # serializes begin() vs a reset ramp
 
     # --- seams ----------------------------------------------------------------
 
@@ -111,8 +125,26 @@ class DeployRunner:
     def run(self) -> None:
         self.clamp.reset(self.executor.arm_q())
         self.running = True
+        was_idle = True     # first activation re-arms too (clears probe state)
+        step = 0
         try:
-            for step in range(self.max_steps):
+            while step < self.max_steps:
+                # 0. gate (dashboard Start/Pause). Idle is HOLDING, not stopped:
+                # the vendored 500 Hz interpolator keeps the last waypoint. We
+                # keep reading the state so a link that dies while idle still
+                # trips instead of leaving a stiff arm unsupervised.
+                if not self._active.is_set():
+                    was_idle = True
+                    self.executor.arm_q()      # keeps state_age() meaningful
+                    self.watchdog.check_state_age(self.executor.state_age())
+                    if self.watchdog.tripped:
+                        break
+                    time.sleep(0.05)
+                    continue
+                if was_idle:
+                    was_idle = False
+                    self._rearm("begin")
+
                 t_cycle_end = self._clock() + self.dt
                 t_command_target = t_cycle_end + self.dt   # future-stamped
 
@@ -124,7 +156,8 @@ class DeployRunner:
                     break
                 observation = self._observe()
                 self.recorder.log("obs", step=step,
-                                  state_age=self.executor.state_age())
+                                  state_age=self.executor.state_age(),
+                                  arm_q=observation["arm_q"])
                 self.strategy.update_observation(observation)
 
                 # 2. wait for a plan (starvation is duration-based, not a spin)
@@ -163,13 +196,121 @@ class DeployRunner:
 
                 # 5. pace
                 self._wait(t_cycle_end)
-                if (step + 1) % 50 == 0:
-                    logger.info("executed %d steps", step + 1)
+                step += 1
+                if step % 50 == 0:
+                    logger.info("executed %d steps", step)
         finally:
             self.running = False
             self.strategy.close()
             if self.watchdog.tripped:
                 logger.error("stopped by watchdog: %s", self.watchdog.reason)
+
+    def _rearm(self, why: str) -> None:
+        """Drop stale plans and re-ground after time passed outside the loop
+        (pause, reset ramp): the world moved on; the old chunk, the causal
+        filters, and the clamp's last knot did not."""
+        if hasattr(self.strategy, "clear"):
+            self.strategy.clear()
+        reset = getattr(self.adapter, "reset", None)
+        if callable(reset):
+            reset()
+        self.clamp.reset(self.executor.arm_q())
+        # starvation timing must restart from NOW, not from before the idle
+        self.watchdog.check_starvation(True, self._clock())
+        self.recorder.log("rearm", why=why)
+
+    # --- lifecycle controls (deploy/dashboard.py POSTs) -------------------------
+
+    @property
+    def is_active(self) -> bool:
+        return self._active.is_set()
+
+    def begin(self) -> None:
+        """Leave idle (the dashboard's Start): the loop resumes observing and
+        inferring; the actual re-arm happens on the loop thread."""
+        if self.watchdog.tripped:
+            raise RuntimeError("watchdog is tripped; nothing runs until restart")
+        if not self._ctrl_lock.acquire(blocking=False):
+            raise RuntimeError("busy — a reset ramp is in progress")
+        try:
+            self._active.set()
+        finally:
+            self._ctrl_lock.release()
+        logger.info("loop ACTIVE — inferring")
+
+    def pause(self) -> None:
+        """Return to idle. NOT an e-stop: the vendored interpolator keeps
+        HOLDING the last waypoint (the arm stays stiff); planning just stops."""
+        self._active.clear()
+        logger.info("loop IDLE — holding pose")
+
+    def record_toggle(self) -> dict:
+        """Roll the recording session boundary (the dashboard's Record button).
+        Needs the RecorderSwitch the CLI wires in; plain recorders can't swap."""
+        toggle = getattr(self.recorder, "toggle", None)
+        if not callable(toggle):
+            raise RuntimeError("record toggle needs a RecorderSwitch "
+                               "(run via `python -m ego2g1.deploy.runner`)")
+        return toggle()
+
+    def reset_to_episode(self, episode_index: int, *, ramp_s: float = 3.0,
+                         max_speed: float = 0.5, settle_s: float = 0.4) -> dict:
+        """Ramp arm+hands to an episode's FIRST posture and re-arm from rest.
+
+        Must be idle: yanking the arm while a policy drives it would fight the
+        planner. The ramp streams future-stamped waypoints through the SAME
+        executor.send path the loop uses — linear interpolation at fps, ramp
+        lengthened if `ramp_s` would break the `max_speed` (rad/s) cap. Blocks
+        until settled, so the dashboard's response means 'done'."""
+        if self._active.is_set():
+            raise RuntimeError("pause before resetting — cannot reset while active")
+        if self.watchdog.tripped:
+            raise RuntimeError("watchdog is tripped; nothing runs until restart")
+        if self.dataset is None:
+            raise RuntimeError("no --dataset given; reset-to-episode needs one")
+        if not self._ctrl_lock.acquire(blocking=False):
+            raise RuntimeError("busy — another reset is in progress")
+        try:
+            from .replay_dataset import load_episode
+
+            ep = load_episode(self.dataset, int(episode_index))
+            q_start = np.asarray(ep["arm"][0], dtype=np.float64)
+            hand_start = {h: np.clip(np.asarray(ep["hand"][h][0], np.float64), 0.0, 1.0)
+                          for h in layout.HANDS}
+            q0 = self.executor.arm_q()
+            h0 = {h: self.last_hands[h].copy() for h in layout.HANDS}
+
+            n = max(1, int(round(ramp_s * self.fps)))
+            cap = max_speed * self.dt                    # rad per tick
+            worst = float(np.abs(q_start - q0).max())
+            if cap > 0:
+                n = max(n, int(np.ceil(worst / cap)))
+            row = np.zeros(_actions.ROBOT_DIM)
+            for k in range(1, n + 1):
+                if self.watchdog.tripped:
+                    raise RuntimeError("tripped during the reset ramp")
+                t_cycle_end = self._clock() + self.dt
+                a = k / n
+                row[_actions.ARM] = (1.0 - a) * q0 + a * q_start
+                for h in layout.HANDS:
+                    row[_actions.HAND[h]] = (1.0 - a) * h0[h] + a * hand_start[h]
+                self.executor.send(row, t_cycle_end + self.dt)
+                self._wait(t_cycle_end)
+            # let the 500 Hz interpolator land + the arm settle, then re-ground
+            self._wait(self._clock() + settle_s)
+
+            arm_q = self.executor.arm_q()
+            for h in layout.HANDS:
+                self.last_hands[h] = hand_start[h].copy()
+            self._rearm(f"reset_to_episode {int(episode_index)}")
+            residual = float(np.abs(arm_q - q_start).max())
+            self.recorder.log("reset", episode=int(episode_index),
+                              q_start=q_start, residual=residual)
+            logger.info("reset to episode %d (residual %.3f rad)",
+                        episode_index, residual)
+            return {"episode": int(episode_index), "residual": residual}
+        finally:
+            self._ctrl_lock.release()
 
     # --- observability (deploy/dashboard.py) -----------------------------------
 
@@ -201,9 +342,12 @@ class DeployRunner:
             "now": now,
             "mode": st.get("mode", "?"),
             "server_rtc": bool(st.get("rtc")),
-            "active": self.running and not self.watchdog.tripped,
-            "recording": not isinstance(self.recorder, _recorder.NullRecorder),
-            "has_dataset": False,      # this runner has no episode reset
+            "active": (self.running and self._active.is_set()
+                       and not self.watchdog.tripped),
+            "recording": bool(getattr(
+                self.recorder, "recording",
+                not isinstance(self.recorder, _recorder.NullRecorder))),
+            "has_dataset": self.dataset is not None,   # enables Reset button
             "task": getattr(self.adapter, "prompt", ""),
             "horizon": horizon, "fps": self.fps, "dim": _actions.ROBOT_DIM,
             # --- the strategy's core data structure ---
@@ -271,9 +415,14 @@ class Args:
     # --- observability ---
     dashboard: bool = False            # live web monitor (deploy/dashboard.py)
     dashboard_port: int = 8080
+    ungated: bool = False              # --dashboard implies a gated start (idle
+                                       # until the page's Start); this opts out
     # --- session ---
     record_dir: str = "recordings"
-    no_record: bool = False
+    no_record: bool = False            # don't auto-open a session (the
+                                       # dashboard's Record button still can)
+    dataset: str | None = None         # lerobot dataset root; enables the
+                                       # dashboard's reset-to-episode
     max_steps: int = 10_000_000
     dry_run: bool = False              # mock executor + static camera, no robot
     skip_latency_check: bool = False   # ONLY for offline debugging; never live
@@ -281,6 +430,7 @@ class Args:
     max_joint_step: float = 0.15
     max_state_age: float = 0.2
     max_starvation: float = 2.0
+    max_track_err: float = 0.10        # metres of IK tracking error before the e-stop
 
 
 def main(args: Args) -> None:
@@ -315,12 +465,10 @@ def main(args: Args) -> None:
         cam = HeadCamera(host=args.camera_host, eye=args.eye)
     cam.connect()
 
-    # --- recorder
-    if args.no_record:
-        rec = _recorder.NullRecorder()
-    else:
-        session = _recorder.new_session(args.record_dir, args.prompt or "deploy")
-        rec = _recorder.Recorder(session, cameras={"head": cam}, meta={
+    # --- recorder: always a RecorderSwitch, so the dashboard's Record button
+    # can roll session boundaries; --no-record just skips the auto-open.
+    rec = _recorder.RecorderSwitch(
+        args.record_dir, args.prompt or "deploy", cameras={"head": cam}, meta={
             "mode": args.mode, "action_mode": action_mode, "horizon": horizon,
             "fps": fps, "host": args.host, "port": args.port,
             "prompt": args.prompt, "dim": _actions.ROBOT_DIM,
@@ -330,7 +478,8 @@ def main(args: Args) -> None:
             "max_latency_steps": args.max_latency_steps,
             "min_smooth_steps": args.min_smooth_steps,
         })
-    rec.start()
+    if not args.no_record:
+        rec.start()
 
     budget = _latency.DelayBudget(fps)
     strategy = _strategies.make_strategy(
@@ -341,7 +490,8 @@ def main(args: Args) -> None:
 
     limits = _safety.SafetyLimits(max_joint_step=args.max_joint_step,
                                   max_state_age=args.max_state_age,
-                                  max_starvation=args.max_starvation)
+                                  max_starvation=args.max_starvation,
+                                  max_tracking_error_m=args.max_track_err)
 
     try:
         # --- connect BEFORE the latency check: the check must see the real
@@ -364,17 +514,31 @@ def main(args: Args) -> None:
             rec.log("latency_check", **dataclasses.asdict(report))
             adapter.reset()   # the probe chunks polluted the causal filters
 
+        gated = args.dashboard and not args.ungated
         runner = DeployRunner(adapter=adapter, strategy=strategy,
                               executor=executor, camera=cam, recorder=rec,
-                              limits=limits, fps=fps, max_steps=args.max_steps)
+                              limits=limits, fps=fps, max_steps=args.max_steps,
+                              gated=gated, dataset=args.dataset)
         dash = None
         if args.dashboard:
             from .dashboard import Dashboard
             dash = Dashboard(runner, port=args.dashboard_port)
-            dash.start()   # up before the prompt, so the page shows the hold
-        input("Robot connected, latency OK. Press Enter to start inference...")
+            dash.start()   # up before the loop, so the page shows the hold
+        if gated:
+            logger.info("gated start: robot holds until you press Start on "
+                        "the dashboard (http://localhost:%d)", dash.port)
+        else:
+            input("Robot connected, latency OK. Press Enter to start inference...")
         try:
             runner.run()
+            if dash is not None and runner.watchdog.tripped:
+                # Stay up for the post-mortem: the operator can read the
+                # telemetry/trip reason instead of losing it to process exit.
+                # damp() is latched — there is no restart from here.
+                logger.error("watchdog tripped — dashboard stays up for "
+                             "inspection; Ctrl-C to exit")
+                while True:
+                    time.sleep(1.0)
         finally:
             if dash is not None:
                 dash.stop()

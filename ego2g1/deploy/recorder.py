@@ -15,15 +15,20 @@ Event kinds the new runner emits (each carries `t` monotonic + `kind`):
 
     meta            once: mode, action_mode, horizon, fps, hosts, strategy params
     latency_check   the startup self-check report
-    obs             per tick: state age, camera frame id
-    infer_result    per inference: latency, start_timestep, splice info, and
+    obs             per tick: state age + the measured arm_q (replay_mujoco.py
+                    renders the body from it)
+    infer_result    per inference: latency, start_timestep, splice info,
                     `actions` — the converted (H, 26) joint chunk, so
-                    replay_record.py can rebuild the buffers exactly
+                    replay_record.py can rebuild the buffers exactly — and
+                    (relative_eef) the per-slot `flange_targets`
     action          per tick: the popped joint row, clamped or not
     clamp           when the clamp actually limited a step
     tracking        per chunk (relative_eef): worst IK tracking error
     worker_error    the async inference worker died (with the exception)
     estop           the damp() call, with the watchdog's reason
+    rearm           stale plans dropped + filters/clamp re-grounded (gated
+                    start, pause-resume, after a reset ramp)
+    reset           a dashboard reset-to-episode, with the landing residual
 
 ISOLATION contract: nothing here runs on, or blocks, a hot thread. `log()`
 builds a small dict and enqueues; one daemon writer drains to JSONL; a second
@@ -212,6 +217,80 @@ class Recorder:
             time.sleep(max(0.0, self._pump_period - (time.perf_counter() - t0)))
 
 
+class RecorderSwitch:
+    """A recorder-shaped proxy whose backing session can be swapped mid-run.
+
+    The runner, strategy, and inference worker all hold ONE recorder reference
+    for their lifetime; the dashboard's Record button needs session boundaries
+    (stop this session, start a fresh directory). This proxy is that seam:
+    everyone logs through the switch, and `toggle()` swaps the delegate. While
+    off, events are dropped (NullRecorder semantics).
+
+    Thread-safety: `log()` is called from hot-ish threads while `toggle()` runs
+    on the dashboard's HTTP thread. The delegate is swapped under a lock;
+    log() takes a plain reference read (one event racing a toggle lands in
+    either session or nowhere — harmless, same as the old loop's `_rec` read).
+    """
+
+    def __init__(self, root, task: str, *, meta: dict, cameras: dict | None = None):
+        self._root = root
+        self._task = task
+        self._meta = dict(meta)
+        self._cameras = cameras or {}
+        self._rec: Recorder | None = None
+        self._lock = threading.Lock()
+
+    # --- producer surface (what runner/strategy/worker call) -----------------
+
+    def log(self, kind: str, **fields) -> None:
+        rec = self._rec
+        if rec is not None:
+            rec.log(kind, **fields)
+
+    def latest_frame_id(self, cam: str) -> int:
+        rec = self._rec
+        return rec.latest_frame_id(cam) if rec is not None else -1
+
+    @property
+    def dir(self):
+        rec = self._rec
+        return rec.dir if rec is not None else None
+
+    @property
+    def recording(self) -> bool:
+        return self._rec is not None
+
+    # --- lifecycle ------------------------------------------------------------
+
+    def start(self):
+        """Open the first session (launch-time auto-record)."""
+        with self._lock:
+            if self._rec is None:
+                self._rec = Recorder(new_session(self._root, self._task),
+                                     meta=self._meta, cameras=self._cameras)
+                self._rec.start()
+
+    def stop(self):
+        with self._lock:
+            rec, self._rec = self._rec, None
+        if rec is not None:
+            rec.stop()
+
+    def toggle(self) -> dict:
+        """Stop the live session, or open a fresh one. The dashboard's Record
+        button contract: {"recording": bool, "dir": str}."""
+        with self._lock:
+            if self._rec is not None:
+                rec, self._rec = self._rec, None
+                rec.stop()
+                return {"recording": False, "dir": str(rec.dir)}
+            rec = Recorder(new_session(self._root, self._task),
+                           meta=self._meta, cameras=self._cameras)
+            rec.start()
+            self._rec = rec
+            return {"recording": True, "dir": str(rec.dir)}
+
+
 class NullRecorder:
     """Same producer API, writes nothing — for tests and --no-record."""
 
@@ -229,7 +308,14 @@ class NullRecorder:
 
 
 def new_session(root, task: str) -> pathlib.Path:
-    """`<root>/<task-slug>_<ISO8601>` — a fresh directory for one recording."""
+    """`<root>/<task-slug>_<ISO8601>` — a fresh directory for one recording.
+    Suffixed if it already exists: two toggles inside one second must not
+    reopen (and truncate) the previous session."""
     slug = "".join(c if c.isalnum() else "_" for c in task)[:40].strip("_") or "session"
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    return pathlib.Path(root) / f"{slug}_{stamp}"
+    path = pathlib.Path(root) / f"{slug}_{stamp}"
+    k = 1
+    while path.exists():
+        k += 1
+        path = pathlib.Path(root) / f"{slug}_{stamp}_{k}"
+    return path

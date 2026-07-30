@@ -127,6 +127,9 @@ class RelativeEEFPolicyAdapter:
         out["slot_errors_m"] = getattr(self._converter, "last_slot_errors", None)
         out["raw_chunk"] = self.last_raw_chunk
         out["request_state"] = self.last_state
+        # per-slot flange target positions (pelvis frame) — replay_mujoco.py's
+        # RED "where the policy wanted the hand" marker
+        out["flange_targets"] = getattr(self._converter, "last_targets", None)
         return out
 
     def _reanchor_joint_rows(self, rows, arm_q_new) -> tuple[np.ndarray, int]:

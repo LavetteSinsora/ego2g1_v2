@@ -118,8 +118,13 @@ accel RMS before it moves anything so you know what to expect.
 ## Running a policy
 
 ```bash
-python -m ego2g1.deploy.runner --host <serve-box> --port 8000 \
-    --prompt "put the bottle in the box" --mode sync
+uv run python -m ego2g1.deploy.runner \
+    --host 127.0.0.1 --port 8000 \
+    --mode sync --prompt "put the bottle in the box" \
+    --dashboard \
+    --network-interface en11 \
+    --max-track-err 0.25 \
+    --dataset ../lerobot_datasets/ego2g1/put_bottle_in_box_teleop/
 ```
 
 `--mode` is one of five consumers (ported from zh_deploy_inference's
@@ -199,12 +204,28 @@ are pure add-ons: the loop's threads gain no code, telemetry is PULLED —
 **Live dashboard** — `--dashboard` on the runner serves a one-page monitor
 (default `:8080`, own daemon thread, ~10 Hz HTTP pulls): active chunk +
 pointer, the commanded 26-dim row, inference light, DelayBudget stats,
-clamp/watchdog counters, camera frame. GET is pure telemetry; the only live
-control is the E-STOP button (POST → `watchdog.trip` → `damp()`). Off by
-default.
+clamp/watchdog counters, camera frame. GET is pure telemetry; POSTs drive the
+lifecycle:
+
+* **Start / Pause** — `--dashboard` implies a GATED start: the loop launches
+  idle (arm holding, nothing inferring) until Start. Pause returns to idle —
+  NOT an e-stop, the 500 Hz interpolator keeps holding the last waypoint.
+  Resume drops the stale chunk and re-grounds (filters, clamp, starvation
+  clock). `--ungated` restores the terminal Enter-to-start.
+* **Record** — rolls the session boundary: stop the current
+  `recordings/<task>_<stamp>/` and open a fresh one per take. Recording still
+  auto-starts at launch (`--no-record` skips the auto-open; the button then
+  records on demand).
+* **Reset** — with `--dataset <lerobot root>`: while paused, ramps arm+hands
+  to episode N's first posture (linear, `max_speed`-capped, streamed through
+  the same `executor.send` path), settles, re-grounds, and reports the
+  landing residual.
+* **E-STOP** — POST → `watchdog.trip` → `damp()`. Latched, no restart. After
+  a trip the process (with the dashboard up) stays alive for the post-mortem.
 
 ```bash
-python -m ego2g1.deploy.runner --host <serve-box> --prompt "..." --dashboard
+python -m ego2g1.deploy.runner --host <serve-box> --prompt "..." --dashboard \
+    --dataset data/lerobot_datasets/ego2g1/<name>   # optional: arms Reset
 python -m ego2g1.deploy.dashboard --demo     # page dev: synthetic data, no hardware
 ```
 
@@ -227,4 +248,23 @@ s.chunk_at(t)   # the (H, 26) chunk itself + index
 Async modes are reconstructed by re-feeding the REAL buffer classes the
 recorded install/pop sequence, so the splice math cannot drift from live. To
 make that exact, `infer_result` events carry the converted joint chunk
-(`actions`) and `meta.json` the strategy params — the only schema additions.
+(`actions`) and `meta.json` the strategy params. For the MuJoCo replay below,
+`obs` events also carry the measured `arm_q` and (relative_eef) each
+`infer_result` the per-slot post-One-Euro `flange_targets`.
+
+**MuJoCo session replay** — scrub a recorded session on the same G1 model
+that ran the IK (`kin/g1.py` + `assets/unitree_g1`): the body renders the
+MEASURED joints; RED/orange spheres are the flange pose the model asked for,
+GREEN/cyan the flange the IK actually commanded (FK of the sent row). RED→
+GREEN is the IK tracking error the watchdog watches; GREEN→body is servo lag.
+
+```bash
+mjpython -m ego2g1.deploy.replay_mujoco recordings/<session>            # macOS GUI
+mjpython -m ego2g1.deploy.replay_mujoco recordings/<session> --at-worst # jump to the trip
+python   -m ego2g1.deploy.replay_mujoco recordings/<session> --check 200  # headless, any OS
+```
+
+Keyboard: SPACE pause, ←/→ scrub, ,/. frame-step, ↑/↓ speed, R restart,
+L loop, HOME start, END worst-error frame. Sessions recorded before the
+schema additions fall back to rendering the commanded joints, without RED
+markers; joint-mode sessions have no flange targets (GREEN only).

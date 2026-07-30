@@ -175,6 +175,87 @@ def test_http_state_page_and_estop():
         dash.stop()
 
 
+def _post(url, body=None):
+    data = json.dumps(body).encode() if body is not None else b""
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return r.status, json.loads(r.read())
+
+
+def test_http_lifecycle_controls(tmp_path, monkeypatch):
+    """Start / Pause / Record / Reset drive a live gated runner end-to-end
+    over HTTP — the dashboard buttons' actual code path."""
+    import threading
+    import time as _time
+
+    from ego2g1.deploy import replay_dataset as _replay_dataset
+    from ego2g1.deploy.recorder import RecorderSwitch
+
+    q_start = np.full(_actions.ARM_DOF, 0.2)
+    monkeypatch.setattr(
+        _replay_dataset, "load_episode",
+        lambda root, ep: {"name": "fake", "arm": np.tile(q_start, (3, 1)),
+                          "pose": None,
+                          "hand": {h: np.zeros((3, layout.HAND_DIM))
+                                   for h in layout.HANDS}})
+
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    policy = JointHoldPolicy()
+    strategy = SynchronousStrategy(policy, chunk_size=policy.horizon)
+    switch = RecorderSwitch(tmp_path, "http test", meta={})
+    runner = DeployRunner(adapter=policy, strategy=strategy, executor=executor,
+                          recorder=switch, fps=FPS, wait=NO_WAIT,
+                          gated=True, dataset="fake://dataset")
+    loop_thread = threading.Thread(target=runner.run, daemon=True)
+    loop_thread.start()
+    dash = Dashboard(runner, port=0)
+    dash.start()
+    base = f"http://127.0.0.1:{dash.port}"
+    try:
+        # gated: idle until Start
+        _time.sleep(0.1)
+        assert executor.sent == []
+
+        code, out = _post(base + "/start")
+        assert code == 200 and out == {"active": True}
+        t0 = _time.monotonic()
+        while not executor.sent and _time.monotonic() - t0 < 5:
+            _time.sleep(0.005)
+        assert executor.sent
+
+        # reset refuses while active (409, server survives)
+        try:
+            _post(base + "/reset", {"episode": 0})
+            raise AssertionError("expected HTTP 409")
+        except urllib.error.HTTPError as e:
+            assert e.code == 409
+            assert "pause" in json.loads(e.read())["error"]
+
+        code, out = _post(base + "/pause")
+        assert code == 200 and out == {"active": False}
+        _time.sleep(0.1)
+
+        code, out = _post(base + "/reset", {"episode": 0})
+        assert code == 200 and out["episode"] == 0
+        np.testing.assert_allclose(executor.arm_q(), q_start)
+
+        code, out = _post(base + "/record")
+        assert code == 200 and out["recording"] is True
+        code, out2 = _post(base + "/record")
+        assert code == 200 and out2["recording"] is False
+        assert out2["dir"] == out["dir"]
+
+        code, body = _get(base + "/state")
+        t = json.loads(body)
+        assert t["has_dataset"] is True and t["active"] is False
+    finally:
+        runner.estop("test done")
+        loop_thread.join(timeout=5.0)
+        dash.stop()
+
+
 def test_demo_loop_matches_runner_telemetry_shape():
     demo = _DemoLoop().telemetry()
     runner, _, _ = make_runner(max_steps=5)

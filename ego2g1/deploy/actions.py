@@ -125,6 +125,10 @@ class RelativeEEFChunks:
         self._smoother = {h: OneEuroSE3(**kw) for h in layout.HANDS}
         self.last_tracking_error: float = 0.0
         self.last_slot_errors = np.zeros(0)
+        # per-slot flange target POSITIONS (pelvis frame, post-One-Euro — the
+        # pose the IK is actually judged against), for the recorder / the
+        # MuJoCo replay's "where the policy wanted the hand" marker
+        self.last_targets: dict[str, np.ndarray] = {}
 
     def convert(self, actions, arm_q14, hand_cmds: dict) -> np.ndarray:
         actions = np.asarray(actions, dtype=np.float64)
@@ -139,15 +143,18 @@ class RelativeEEFChunks:
 
         out = np.empty((len(actions), ROBOT_DIM), dtype=np.float64)
         slot_err = np.zeros(len(actions))
+        tgt_pos = {h: np.empty((len(actions), 3)) for h in layout.HANDS}
         for k, row in enumerate(actions):
             targets = {}
             for h in layout.HANDS:
                 T = se3.compose(anchor[h], row[layout.EEF[h]])
                 targets[h] = self._smoother[h].filter(T, self.dt)
+                tgt_pos[h][k] = targets[h][:3, 3]
             out[k, ARM] = self.kin.solve(targets)
             slot_err[k] = max(self.kin.tracking_error(targets).values())
             for h in layout.HANDS:
                 out[k, HAND[h]] = np.clip(row[layout.HAND[h]], 0.0, 1.0)
+        self.last_targets = tgt_pos
         # per-slot residual PROFILE, not just the max: a residual that grows
         # with slot index means inflated deltas (e.g. per-slot rescale missing
         # server-side); a flat offset from slot 0 means an anchor/frame bug

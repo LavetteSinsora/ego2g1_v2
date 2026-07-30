@@ -35,6 +35,15 @@ is stored, so a filter can gate residual workspace-edge events later. Set
 `resolve_proprio=false` to reproduce the old (jittery) behavior for hardware
 A/B replay.
 
+## Where the raw episodes live
+
+Raw Pico recordings live OUTSIDE this repo (they are multi-GB and per-machine).
+The pipeline reaches them through `PipelineConfig.episodes_dir`
+(`ego2g1/data/config.py`; default `data/<name>/`): either copy/move the episode
+hdf5 dirs under `data/` (git-ignored) or point `episodes_dir` at their real
+location. **Never symlink them in** — this repo must clone standalone, and
+`tests/test_no_symlinks.py` enforces that.
+
 ## Run
 
 ```bash

@@ -589,6 +589,19 @@ def main_relation(config: _config.EgoRelationTrainConfig):
     model_config = dataclasses.replace(model_config_base, loss_dim_weights=weights)
     logging.info(f"loss_dim_weights (mean 1): {[round(w, 4) for w in weights]}")
 
+    # Safeguard 2's target, resolved HERE and nowhere else. It has to be a
+    # concrete float taken from the PRETRAINED table: the model is constructed
+    # under jax.eval_shape (tracers) and before the weight loader runs, so it
+    # cannot measure this itself. Cached beside the params, so the 12 GB restore
+    # happens once per checkpoint, not once per run.
+    if config.n_objects:
+        target_norm = config.relation_target_norm
+        if target_norm is None:
+            logging.info("measuring PaliGemma embedding norm (once per checkpoint; cached)...")
+            target_norm = _relation.paligemma_embedding_norm(config.weight_loader_params_path)
+        model_config = dataclasses.replace(model_config, relation_target_norm=target_norm)
+        logging.info(f"relation_target_norm: {target_norm:.4f} (post-sqrt(width) token scale)")
+
     data_cfg = _data_config.create_relation_data_config(
         config, model_config, stats_dir=stats_dir, shuffle_objects=config.shuffle_object_order,
     )

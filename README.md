@@ -23,7 +23,8 @@ ego2g1/            the one importable package; layers only import downward
   deploy/          joint-chunk execution on the proven unitree_deploy interpolator;
                    action modes: relative-EEF (IK here) and joint-space (no IK)
 assets/            G1 + Revo2 MJCF/URDF — the single copy
-data/              raw recordings + generated datasets (git-ignored; docs/data.md)
+data/              raw recordings + generated datasets (git-ignored; copy raw
+                   episodes in or set episodes_dir — never symlink; docs/data.md)
 tools/             teleop (WebXR bare-hand), lift column, diagnostics
 third_party/       openpi (submodule), unitree_deploy (vendored)
 envs/              per-machine profiles: mac dev, PPU train/serve, robot PC
@@ -71,7 +72,11 @@ uv sync --group deploy                                      # once; needs CYCLON
 uv run python -m ego2g1.deploy.check listen                 # then walk the rung ladder
 uv run python -m ego2g1.deploy.replay_dataset --dataset data/lerobot_datasets/ego2g1/put_bottle_in_box_ego
 uv run python -m ego2g1.deploy.check latency --host <serve-box>
-uv run python -m ego2g1.deploy.runner --host <serve-box> --port 8000 --mode sync
+uv run python -m ego2g1.deploy.runner --host <serve-box> --port 8000 --mode sync \
+    --dashboard --dataset data/lerobot_datasets/ego2g1/put_bottle_in_box_ego
+# --dashboard gates the start behind the web page's Start button and adds
+# Pause / per-take Record / reset-to-episode / E-STOP (docs/deploy.md).
+mjpython -m ego2g1.deploy.replay_mujoco recordings/<session> --at-worst  # scrub a rollout
 
 # 5. TELEOP (optional; bare-hand WebXR)                     # tools/teleop/README.md
 uv sync --group teleop

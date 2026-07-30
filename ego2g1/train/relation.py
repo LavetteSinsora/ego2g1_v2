@@ -122,18 +122,85 @@ class GraspHead(nnx.Module):
         return logits.reshape(logits.shape[0], self.action_horizon, self.n_hands)
 
 
-def paligemma_embedding_norm(llm) -> float:
-    """Mean L2 norm of the PaliGemma token-embedding table.
+def _find_embedding_table(tree):
+    """Depth-first search for the `input_embedding` leaf.
 
-    The target the injected relation tokens are scaled to match (safeguard 2).
-    Read from the live param tree rather than hard-coded, so it stays correct if
-    the pretrained checkpoint changes.
+    Searched by NAME rather than by a fixed path: the checkpoint tree and the
+    live nnx tree nest it differently (`PaliGemma/llm/embedder/...` vs
+    `embedder/...`), and the path is not part of any contract we control.
     """
-    state = nnx.state(llm).to_pure_dict()
-    params = state.get("params", state)
-    table = params["embedder"]["input_embedding"]
-    table = jnp.asarray(table.value if hasattr(table, "value") else table)
-    return float(jnp.mean(jnp.linalg.norm(table.astype(jnp.float32), axis=-1)))
+    if isinstance(tree, dict):
+        if "input_embedding" in tree and not isinstance(tree["input_embedding"], dict):
+            return tree["input_embedding"]
+        for value in tree.values():
+            found = _find_embedding_table(value)
+            if found is not None:
+                return found
+    return None
+
+
+def paligemma_embedding_norm(params_path: str) -> float:
+    """Mean L2 norm of a PRETRAINED PaliGemma token embedding AS IT ENTERS the
+    residual stream — the target injected relation tokens are scaled to match
+    (safeguard 2).
+
+    Reads the checkpoint on disk. It must, for three separate reasons, all of
+    which were wrong when this read the live nnx param tree from
+    `Ego2G1Pi0.__init__`:
+
+    1. It has to run OUTSIDE a trace. `__init__` executes under
+       `jax.eval_shape`, where every leaf is an abstract tracer and `float()`
+       raises ConcretizationTypeError.
+    2. It has to read the PRETRAINED table. `__init__` runs before the weight
+       loader, so the live tree there holds nnx's random init, not pi05_base —
+       it would have returned a number describing noise.
+    3. It has to include `gemma.Embedder.encode`'s `x *= sqrt(embed_dim)`
+       (gemma.py:150). Tokens reach the stream sqrt(2048) ~= 45x larger than
+       their table rows, and `embed_prefix` adds the relation delta AFTER that
+       scaling. Matching the raw row norm would inject a token ~45x too small —
+       exactly the "attention ignores it, expensive no-op" failure this
+       safeguard exists to prevent.
+
+    Cached next to the params, keyed by path: the value is a constant of the
+    pretrained checkpoint, and restoring 12+ GB to read one array is not
+    something to repeat every run.
+    """
+    import json
+    import pathlib
+
+    import numpy as np
+
+    import openpi.models.model as _model_mod
+    import openpi.shared.download as _download
+
+    local = _download.maybe_download(params_path)
+    cache = pathlib.Path(local).parent / "ego2g1_embedding_norm.json"
+    key = str(params_path)
+    if cache.exists():
+        try:
+            hit = json.loads(cache.read_text()).get(key)
+            if hit is not None:
+                return float(hit)
+        except (ValueError, OSError):
+            pass  # unreadable cache is not a reason to fail; just re-measure
+
+    params = _model_mod.restore_params(local, restore_type=np.ndarray)
+    table = _find_embedding_table(params)
+    if table is None:
+        raise ValueError(f"no `input_embedding` leaf in the params at {params_path}")
+    table = np.asarray(table, dtype=np.float32)
+    row_norm = float(np.mean(np.linalg.norm(table, axis=-1)))
+    width = table.shape[-1]
+    del params, table
+    value = row_norm * float(np.sqrt(width))
+
+    try:
+        existing = json.loads(cache.read_text()) if cache.exists() else {}
+        existing[key] = value
+        cache.write_text(json.dumps(existing, indent=1))
+    except OSError:
+        pass  # a read-only asset cache just means we measure again next run
+    return value
 
 
 @at.typecheck

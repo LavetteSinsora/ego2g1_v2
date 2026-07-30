@@ -53,7 +53,7 @@ def _diag_fields(result: dict) -> dict:
     profile. Logged with every infer_result so a bad served chunk is fully
     diagnosable from the recording alone (the 138 mm E-STOP lesson)."""
     out = {}
-    for k in ("raw_chunk", "request_state", "slot_errors_m"):
+    for k in ("raw_chunk", "request_state", "slot_errors_m", "flange_targets"):
         v = result.get(k)
         if v is not None:
             out[k] = v
@@ -127,6 +127,12 @@ class SynchronousStrategy:
         self._index += 1
         return action
 
+    def clear(self) -> None:
+        """[ego2g1] Drop the current chunk (pause-resume / reset-to-episode):
+        the next update_observation re-infers from a fresh observation."""
+        self._chunk = None
+        self._index = 0
+
     def close(self) -> None:
         pass
 
@@ -171,6 +177,13 @@ class NaiveAsyncBuffer:
     def current_timestep(self) -> int:
         with self._lock:
             return self._global_t
+
+    def clear(self) -> None:
+        """[ego2g1] Drop all plan state. `_global_t` stays monotonic so the
+        skip arithmetic of a chunk already in flight cannot go negative."""
+        with self._lock:
+            self._chunk = None
+            self._last_action = None
 
     def telemetry(self) -> dict:
         """[ego2g1] dashboard snapshot; own lock only, small copies."""
@@ -231,6 +244,13 @@ class TemporalEnsemblingBuffer:
     def current_timestep(self) -> int:
         with self._lock:
             return self._current_t
+
+    def clear(self) -> None:
+        """[ego2g1] Drop all votes and the held action; `_current_t` stays
+        monotonic (matches add_chunk's timestep bookkeeping)."""
+        with self._lock:
+            self._predictions.clear()
+            self._last_action = None
 
     def telemetry(self) -> dict:
         """[ego2g1] dashboard snapshot. No single active chunk exists here
@@ -321,6 +341,14 @@ class TemporalSmoothingBuffer:
         with self._lock:
             return self._global_t
 
+    def clear(self) -> None:
+        """[ego2g1] Drop the queued rows and the blend seed; a chunk landing
+        after this installs unblended, as if it were the first."""
+        with self._lock:
+            self._chunk.clear()
+            self._last_action = None
+            self._steps_since_update = 0
+
     def telemetry(self) -> dict:
         """[ego2g1] dashboard snapshot. horizon/index reconstruct the current
         combined (blended) chunk: `_steps_since_update` rows consumed since the
@@ -392,6 +420,18 @@ class AsyncStrategy:
         if action is None:
             raise RuntimeError("No asynchronous action is available")
         return action
+
+    def clear(self) -> None:
+        """[ego2g1] Drop buffered plans + the RTC seed and stop re-inferring on
+        the stale observation (pause-resume / reset-to-episode). A request
+        already in flight may still land one chunk afterwards; the next fresh
+        observation's chunks supersede it (same exposure the old queue.clear()
+        had)."""
+        with self._condition:
+            self._observation = None
+            self._previous_chunk = None
+        if hasattr(self._buffer, "clear"):
+            self._buffer.clear()
 
     def close(self) -> None:
         with self._condition:

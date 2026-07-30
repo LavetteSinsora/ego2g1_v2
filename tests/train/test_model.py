@@ -4,6 +4,7 @@ patch safety, per-token/scalar equivalence, RTC loss and sampling pins.
 CPU-runnable via the `dummy` gemma variant; dtype float32 for tight tolerances.
 """
 
+import os
 import subprocess
 import sys
 
@@ -79,8 +80,17 @@ m = cfg.create(jax.random.key(0))
 np.asarray(m.compute_loss(jax.random.key(1), cfg.fake_obs(2), cfg.fake_act(2)))
 print("OK")
 """
+    # Pin the child to CPU. This is a bitwise-identity check on a dummy-sized
+    # model, so CPU is the deterministic place to run it — and on an accelerator
+    # box the parent pytest process already holds XLA_PYTHON_CLIENT_MEM_FRACTION
+    # of every device, so an inheriting child OOMs at model construction (seen on
+    # the PPU: RESOURCE_EXHAUSTED inside siglip.Encoder) long before it can compare.
     res = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "JAX_PLATFORMS": "cpu"},
     )
     assert res.returncode == 0, res.stderr
     assert "OK" in res.stdout

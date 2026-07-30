@@ -63,9 +63,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """State-changing controls. GET stays pure telemetry; anything that
-        affects the robot is a POST. The new DeployRunner supports estop only;
-        the other endpoints answer 409 unless the loop object provides them
-        (the --demo loop stubs them all so the page can be exercised)."""
+        affects the robot is a POST. Each route maps to a DeployRunner method
+        (begin/pause/estop/record_toggle/reset_to_episode); anything the loop
+        object doesn't provide answers 409 with the reason (the --demo loop
+        stubs them all so the page can be exercised)."""
         dash = self.server.dash
         path = self.path.split("?", 1)[0]
         loop = dash.loop

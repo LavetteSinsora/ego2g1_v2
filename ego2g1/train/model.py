@@ -71,6 +71,14 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
     # tokenizer download; tests/train/test_relation_transforms.py asserts the
     # tokenizer really maps the sentinel to this id.
     relation_sentinel_id: int = 7
+    # L2 norm the injected relation token is scaled to at init (safeguard 2),
+    # measured from the PRETRAINED embedding table by
+    # relation.paligemma_embedding_norm and set by the train entrypoint. It
+    # cannot be read here: this config is built before the weight loader runs
+    # and the model is constructed under jax.eval_shape. None = 1.0, which is
+    # fine for shape/zero-init tests and wrong for training, so the entrypoint
+    # refuses to train without it.
+    relation_target_norm: float | None = None
     # Per-dim loss weights over the D_real action dims, mean 1. None = uniform.
     # A tuple (not an array) so the frozen dataclass stays hashable.
     loss_dim_weights: tuple[float, ...] | None = None
@@ -156,11 +164,15 @@ class Ego2G1Pi0(_pi0.Pi0):
                 config.relation_hidden,
                 self.PaliGemma.llm.module.configs[0].width,
                 rngs=rngs,
-                # Match the pretrained embedding table's magnitude so the injected
-                # token starts life the size of a real word (safeguard 2 in
-                # ego2g1/train/relation.py). Read from the live table, so it stays
-                # right if the pretrained checkpoint changes.
-                target_norm=_relation.paligemma_embedding_norm(self.PaliGemma.llm),
+                # Match a real token's magnitude so the injected embedding starts
+                # life the size of a word (safeguard 2 in relation.py). A STATIC
+                # float, measured from the pretrained checkpoint by the entrypoint:
+                # this constructor runs under jax.eval_shape (tracers, no concrete
+                # values) and before the weight loader (so the live table here is
+                # random init, not pi05_base). 1.0 is a test-only fallback.
+                target_norm=(
+                    1.0 if config.relation_target_norm is None else config.relation_target_norm
+                ),
             )
         if config.grasp_head:
             self.grasp_head = _relation.GraspHead(

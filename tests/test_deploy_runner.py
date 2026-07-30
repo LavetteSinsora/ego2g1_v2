@@ -1,11 +1,14 @@
 """The deploy loop end-to-end against the MockExecutor: no DDS, no mujoco.
 
 Covers: future-stamped sends, clamp wiring, watchdog trips (insane rows,
-starvation) reaching damp(), hand-command tracking, and the recorder's
-events.jsonl actually containing the seams.
+starvation) reaching damp(), hand-command tracking, the recorder's
+events.jsonl actually containing the seams, and the dashboard-driven
+lifecycle (gated start, pause/resume, record toggle, reset-to-episode).
 """
 
 import json
+import pathlib
+import threading
 import time
 
 import numpy as np
@@ -13,8 +16,9 @@ import pytest
 
 from ego2g1.core import layout
 from ego2g1.deploy import actions as _actions
+from ego2g1.deploy import replay_dataset as _replay_dataset
 from ego2g1.deploy.executor import MockExecutor
-from ego2g1.deploy.recorder import Recorder
+from ego2g1.deploy.recorder import Recorder, RecorderSwitch
 from ego2g1.deploy.runner import DeployRunner
 from ego2g1.deploy.safety import SafetyLimits
 from ego2g1.deploy.strategies import SynchronousStrategy
@@ -161,6 +165,171 @@ def test_recorder_captures_the_seams(tmp_path):
     assert all("latency" in e for e in infer)
     meta = json.loads((tmp_path / "session" / "meta.json").read_text())
     assert meta["horizon"] == 5 and "t0_monotonic" in meta
+
+
+def _wait_for(cond, timeout=5.0):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if cond():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def test_gated_runner_idles_until_begin():
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = make_runner(JointHoldPolicy(), executor, max_steps=6, gated=True)
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    time.sleep(0.15)                              # idle ticks, no commands
+    assert executor.sent == []
+    assert runner.telemetry()["active"] is False
+    runner.begin()
+    t.join(timeout=5.0)
+    assert not t.is_alive()
+    assert runner.steps_executed == 6             # max_steps counts ACTIVE ticks
+    assert len(executor.sent) == 6
+
+
+def test_begin_refuses_while_tripped():
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = make_runner(JointHoldPolicy(), executor, gated=True)
+    runner.estop("test")
+    with pytest.raises(RuntimeError, match="tripped"):
+        runner.begin()
+
+
+def test_pause_holds_and_resume_reinfers(tmp_path):
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    policy = JointHoldPolicy(horizon=3)
+    rec = Recorder(tmp_path / "session", meta={})
+    rec.start()
+    strategy = SynchronousStrategy(policy, chunk_size=3)
+    runner = DeployRunner(adapter=policy, strategy=strategy, executor=executor,
+                          recorder=rec, fps=FPS, wait=NO_WAIT, gated=True)
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    try:
+        runner.begin()
+        assert _wait_for(lambda: len(executor.sent) >= 4)
+        runner.pause()
+        time.sleep(0.12)                          # let the loop reach the gate
+        n = len(executor.sent)
+        time.sleep(0.12)
+        assert len(executor.sent) == n            # idle == holding, not sending
+        assert runner.telemetry()["active"] is False
+
+        calls_before = policy.calls
+        runner.begin()                            # resume drops the stale chunk
+        assert _wait_for(lambda: len(executor.sent) > n)
+        assert policy.calls > calls_before        # re-inferred, mid-chunk or not
+    finally:
+        runner.estop("test done")                 # ends the loop
+        t.join(timeout=5.0)
+        rec.stop()
+    events = [json.loads(l) for l in
+              (tmp_path / "session" / "events.jsonl").read_text().splitlines()]
+    whys = [e["why"] for e in events if e["kind"] == "rearm"]
+    assert whys.count("begin") >= 2               # first start + the resume
+
+
+def _fake_episode(q_start, hand=0.7, n=4):
+    return {"name": "fake", "arm": np.tile(q_start, (n, 1)),
+            "pose": None,
+            "hand": {h: np.full((n, layout.HAND_DIM), hand)
+                     for h in layout.HANDS}}
+
+
+def test_reset_to_episode_ramps_capped_and_rearms(monkeypatch):
+    q_start = np.full(_actions.ARM_DOF, 0.3)
+    monkeypatch.setattr(_replay_dataset, "load_episode",
+                        lambda root, ep: _fake_episode(q_start))
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = make_runner(JointHoldPolicy(), executor, gated=True,
+                         dataset="fake://dataset")
+    out = runner.reset_to_episode(0, ramp_s=0.01, max_speed=2.0, settle_s=0.0)
+    assert out["episode"] == 0
+    assert out["residual"] < 1e-9                 # MockExecutor tracks instantly
+    # the ramp streamed monotone, per-tick-capped waypoints to the target
+    qs = np.array([row[_actions.ARM] for _, row in executor.sent])
+    cap = 2.0 / FPS + 1e-9
+    assert np.all(np.abs(np.diff(qs, axis=0)) <= cap)
+    assert np.all(np.abs(qs[0]) <= cap)           # first step capped from q=0
+    np.testing.assert_allclose(qs[-1], q_start)
+    np.testing.assert_allclose(runner.last_hands["left"], 0.7)
+    assert runner.telemetry()["has_dataset"] is True
+
+
+def test_reset_to_episode_refusals(monkeypatch):
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = make_runner(JointHoldPolicy(), executor)   # active (ungated)
+    with pytest.raises(RuntimeError, match="pause before resetting"):
+        runner.reset_to_episode(0)
+    runner.pause()
+    with pytest.raises(RuntimeError, match="no --dataset"):
+        runner.reset_to_episode(0)
+    runner.dataset = "fake://dataset"
+    runner.estop("test")
+    with pytest.raises(RuntimeError, match="tripped"):
+        runner.reset_to_episode(0)
+
+
+def test_record_toggle_rolls_session_boundaries(tmp_path):
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    switch = RecorderSwitch(tmp_path, "toggle test", meta={"fps": FPS})
+    runner = make_runner(JointHoldPolicy(), executor, recorder=switch,
+                         gated=True)
+    assert runner.telemetry()["recording"] is False
+    switch.log("obs", step=0)                     # dropped while off
+    out1 = runner.record_toggle()
+    assert out1["recording"] is True
+    d1 = out1["dir"]
+    switch.log("action", step=1, row=[0.0])
+    assert runner.telemetry()["recording"] is True
+    out2 = runner.record_toggle()
+    assert out2["recording"] is False and out2["dir"] == d1
+    out3 = runner.record_toggle()
+    d2 = out3["dir"]
+    assert d2 != d1                               # a FRESH directory per take
+    runner.record_toggle()
+
+    events = [json.loads(l) for l in
+              (pathlib.Path(d1) / "events.jsonl").read_text().splitlines()]
+    assert [e["kind"] for e in events] == ["action"]   # pre-toggle log dropped
+    assert (pathlib.Path(d2) / "events.jsonl").exists()
+
+
+def test_record_toggle_without_switch_is_a_409_shaped_error():
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = make_runner(JointHoldPolicy(), executor)   # NullRecorder default
+    with pytest.raises(RuntimeError, match="RecorderSwitch"):
+        runner.record_toggle()
+
+
+def test_obs_events_carry_measured_arm_q(tmp_path):
+    executor = MockExecutor(fps=FPS, initial_q=np.full(_actions.ARM_DOF, 0.1))
+    executor.connect()
+    rec = Recorder(tmp_path / "session", meta={})
+    rec.start()
+    policy = JointHoldPolicy()
+    strategy = SynchronousStrategy(policy, chunk_size=policy.horizon)
+    runner = DeployRunner(adapter=policy, strategy=strategy, executor=executor,
+                          recorder=rec, fps=FPS, wait=NO_WAIT, max_steps=3)
+    runner.run()
+    rec.stop()
+    events = [json.loads(l) for l in
+              (tmp_path / "session" / "events.jsonl").read_text().splitlines()]
+    obs = [e for e in events if e["kind"] == "obs"]
+    assert len(obs) == 3
+    assert all(len(e["arm_q"]) == _actions.ARM_DOF for e in obs)
+    assert obs[0]["arm_q"] == [0.1] * _actions.ARM_DOF
 
 
 def test_mock_executor_contract():
