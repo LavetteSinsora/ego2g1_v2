@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core import layout, se3
+from ..core import layout, relation_layout, se3
 from . import actions as _actions
 
 
@@ -158,9 +158,103 @@ class RelativeEEFPolicyAdapter:
         self._converter.reset()
 
 
+class RelationPolicyAdapter:
+    """`relation_eef` mode: `EgoRelationTrainConfig` checkpoints.
+
+    Up:   (56,) relation state, HAND-MAJOR:
+              [left->obj0(9) left->obj1(9) left->obj2(9)
+               right->obj0(9) right->obj1(9) right->obj2(9)
+               grasp_left grasp_right]
+          This is the EXACT layout `ego2g1.train.relation_transforms
+          .RelationPrompt.__call__` expects on `observation/state` (re-read
+          that docstring/body before touching this class) — object order
+          must match the checkpoint's `train_config.objects`, UNSHUFFLED
+          (serving builds `create_relation_data_config(...,
+          shuffle_objects=False)`, docs/relation_deploy_plan.md §4.2).
+    Down: (H, 14) anchor-relative rotvec chunk ->
+          `actions.RelativeEEFRotvecChunks` (OneEuroSE3 -> DualArmIK
+          posture-tracks-last @ 0.05 -> JointFilter) -> (H, 26).
+
+    THIS ADAPTER DOES NOT COMPUTE THE RELATION STATE. Live perception
+    (object detection + depth + hand-relative geometry,
+    docs/relation_deploy_plan.md §5, "Phase 2") is not built yet. Until it
+    is, this is a thin pass-through: the caller must place the already-
+    computed (56,) float32 array at `request["relation_state"]` before
+    calling `.infer(...)` — a stand-in for what the future
+    `RelationPerception.observe(...)` module will produce
+    (`percept["state"]` in that module's contract). Whoever builds Phase 2:
+    match this exact layout (hand-major, unshuffled object order, grasp
+    binaries at the tail, vec9 = [tx,ty,tz, R[:,0], R[:,1]] per
+    `ego2g1.core.rot6d`) — a mismatched layout silently mispairs an object
+    name with the wrong geometry and trains/serves a plausible-looking but
+    wrong policy.
+
+    RTC is NOT supported for this mode (`EgoRelationTrainConfig
+    .rtc_training = False`; the reanchor-prefix math for rotvec deltas +
+    per-slot-quantized (gripper-exempt) actions needs its own design,
+    docs/relation_deploy_plan.md §8) — `.infer` raises rather than silently
+    dropping the prefix if the caller asks for it.
+
+    `last_tracking_error` mirrors `RelativeEEFPolicyAdapter`'s contract:
+    worst IK flange error (metres) over the last converted chunk, for the
+    runner's watchdog.
+    """
+
+    mode = "relation_eef"
+
+    def __init__(self, client, prompt: str = "", *, converter=None, kin=None,
+                 ik_iters: int = 25, posture_cost: float = 0.05,
+                 collision_min_dist: float = 0.005):
+        self._client = client
+        self.prompt = prompt
+        self.action_horizon = int(client.action_horizon)
+        self.fps = int(client.fps)
+        self._converter = converter or _actions.RelativeEEFRotvecChunks(
+            kin, fps=self.fps, ik_iters=ik_iters, posture_cost=posture_cost,
+            collision_min_dist=collision_min_dist)
+        self._kin = self._converter.kin
+
+    @property
+    def last_tracking_error(self) -> float:
+        return self._converter.last_tracking_error
+
+    def infer(self, request: dict) -> dict:
+        arm_q = np.asarray(request["arm_q"], dtype=np.float64)
+        hand_cmds = request["hand_cmds"]
+        state = np.asarray(request["relation_state"], dtype=np.float32)
+        if state.shape != (relation_layout.RELATION_STATE_DIM,):
+            raise ValueError(
+                f"relation_state: expected ({relation_layout.RELATION_STATE_DIM},), "
+                f"got {state.shape}")
+
+        if request.get("enable_rtc") and request.get("prev_action_chunk") is not None:
+            raise NotImplementedError(
+                "RTC is not implemented for relation_eef mode "
+                "(docs/relation_deploy_plan.md §8: the rotvec-delta reanchor "
+                "math is a separate design, not built yet)")
+
+        out = self._client.infer(request.get("image"), state,
+                                 request.get("prompt", self.prompt))
+        # keep the raw model-space chunk + the request state for the recorder,
+        # same reasoning as RelativeEEFPolicyAdapter: undiagnosable otherwise
+        self.last_state = state
+        self.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
+        out["actions"] = self._converter.convert(out["actions"], arm_q, hand_cmds)
+        out["slot_errors_m"] = getattr(self._converter, "last_slot_errors", None)
+        out["raw_chunk"] = self.last_raw_chunk
+        out["request_state"] = self.last_state
+        out["flange_targets"] = getattr(self._converter, "last_targets", None)
+        return out
+
+    def reset(self) -> None:
+        self._converter.reset()
+
+
 def make_adapter(action_mode: str, client, prompt: str = "", **kwargs):
     if action_mode == "joint":
         return JointPolicyAdapter(client, prompt)
     if action_mode == "relative_eef":
         return RelativeEEFPolicyAdapter(client, prompt, **kwargs)
+    if action_mode == "relation_eef":
+        return RelationPolicyAdapter(client, prompt, **kwargs)
     raise ValueError(f"unknown action mode {action_mode!r}")
