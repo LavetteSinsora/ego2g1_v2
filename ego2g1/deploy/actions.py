@@ -19,6 +19,16 @@ absolute joint-space rows in executor order — so everything downstream
                      JointFilter 4-tap                       (after IK)
                  with the IK re-grounded at the measured joints each chunk and
                  warm-carried row to row within it.
+  relation_eef   (H, 14) anchor-relative EEF deltas, per hand [dx,dy,dz,
+                 rx,ry,rz] (translation + ROTATION-VECTOR, not 6D), plus one
+                 RAW binary gripper dim per hand at the tail
+                 (ego2g1.core.relation_layout, EgoRelationTrainConfig). Same
+                 measured pipeline as relative_eef — OneEuroSE3 -> DualArmIK
+                 posture-tracks-last @ 0.05 -> JointFilter — only the pose
+                 decode (rotvec instead of vec9/6D) and the gripper expansion
+                 (binary -> 6 motors via gripper_calib.BRAINCO_CLOSED_POSE,
+                 a measurement placeholder) differ. See
+                 docs/relation_deploy_plan.md §3.
 
 Executor row layout (unitree_deploy `unitree_g1_brainco`, robot_configs
 g1_motors + brainco_motors — verified against the old unitree_backend.py):
@@ -38,7 +48,8 @@ the seam overlap; that is a bounded extra smoothing lag, not a discontinuity.
 
 import numpy as np
 
-from ..core import layout, se3
+from ..core import layout, relation_layout, rotvec, se3
+from . import gripper_calib
 
 # --- executor row layout ------------------------------------------------------
 
@@ -171,10 +182,115 @@ class RelativeEEFChunks:
         self.kin.reset()
 
 
+class RelativeEEFRotvecChunks:
+    """`relation_eef` mode: (H, 14) anchor-relative rotvec chunks -> (H, 26) joints.
+
+    Deploy-side analogue of `ego2g1.train.relation_transforms
+    .RelativeEEFRotvecActions` (the training-side transform that built the
+    ground truth this class inverts). Structurally identical to
+    `RelativeEEFChunks` — same FK anchor -> OneEuroSE3 -> DualArmIK
+    (posture-tracks-last @ 0.05) -> JointFilter pipeline, same
+    `last_tracking_error`/`last_slot_errors`/`last_targets` telemetry contract
+    — only two things differ:
+
+      pose decode  rotvec instead of vec9/6D: per hand, per row k,
+                       delta_T = core.rotvec.vec6_to_se3(row[EEF6[h]])   # [t(3), rotvec(3)]
+                       target  = anchor[h] @ delta_T
+                   exactly inverting `RelativeEEFRotvecActions`'s
+                       delta_k = inv(T_current) @ T_target_k
+                       row[k]  = [delta_k.t, mat_to_rotvec(delta_k.R)]
+
+      gripper      one RAW binary dim per hand (not the 6-dim absolute
+                   Revo2 command RelativeEEFChunks reads straight off the
+                   action row). `PerSlotQuantizeActionsInverse` explicitly
+                   EXEMPTS `gripper_dims` from its inverse-quantile transform
+                   (ego2g1/train/relation_transforms.py), so the value here
+                   arrives exactly as the model produced it, in the same
+                   {-1,+1}-ish convention `RelativeEEFRotvecActions` encoded
+                   {0 open, 1 closed} into (`grip = target * 2 - 1`):
+                       frac = clip((raw_grip + 1) / 2, 0, 1)
+                       cmd  = frac * closed_pose[hand]            # (6,) motor cmd
+                   `closed_pose` is a PER-ROBOT MEASUREMENT that does not
+                   exist yet; it defaults to
+                   `gripper_calib.BRAINCO_CLOSED_POSE`, a documented
+                   placeholder ("every motor fully closed") — swapping in the
+                   real measured arrays means editing only
+                   `gripper_calib.py`, nothing here.
+    """
+
+    mode = "relation_eef"
+
+    def __init__(self, kin=None, *, fps: int = 30, ik_iters: int = 25,
+                 posture_cost: float = 0.05, collision_min_dist: float = 0.005,
+                 one_euro_kwargs: dict | None = None,
+                 closed_pose: dict[str, np.ndarray] | None = None):
+        from ..kin.filters import OneEuroSE3   # numpy-only
+
+        if kin is None:
+            from .kinematics import Kinematics  # mujoco enters here, lazily
+            kin = Kinematics(ik_iters=ik_iters, fps=fps,
+                             posture_cost=posture_cost,
+                             collision_min_dist=collision_min_dist)
+        self.kin = kin
+        self.dt = 1.0 / float(fps)
+        kw = one_euro_kwargs or {}
+        self._smoother = {h: OneEuroSE3(**kw) for h in relation_layout.HANDS}
+        self.closed_pose = (dict(closed_pose) if closed_pose is not None
+                            else dict(gripper_calib.BRAINCO_CLOSED_POSE))
+        self.last_tracking_error: float = 0.0
+        self.last_slot_errors = np.zeros(0)
+        # per-slot flange target POSITIONS (pelvis frame, post-One-Euro), same
+        # meaning as RelativeEEFChunks.last_targets — the recorder / MuJoCo
+        # replay's "where the policy wanted the hand" marker
+        self.last_targets: dict[str, np.ndarray] = {}
+
+    def convert(self, actions, arm_q14, hand_cmds: dict) -> np.ndarray:
+        actions = np.asarray(actions, dtype=np.float64)
+        if actions.ndim != 2 or actions.shape[1] != relation_layout.ACTION_DIM:
+            raise ValueError(
+                f"relation_eef mode expects (H, {relation_layout.ACTION_DIM}), "
+                f"got {actions.shape}")
+        if not np.all(np.isfinite(actions)):
+            raise ValueError("relation_eef chunk contains non-finite values")
+
+        anchor = self.kin.flange_poses(arm_q14)
+        self.kin.ground(arm_q14)
+
+        out = np.empty((len(actions), ROBOT_DIM), dtype=np.float64)
+        slot_err = np.zeros(len(actions))
+        tgt_pos = {h: np.empty((len(actions), 3)) for h in relation_layout.HANDS}
+        for k, row in enumerate(actions):
+            targets = {}
+            for h in relation_layout.HANDS:
+                delta_T = rotvec.vec6_to_se3(row[relation_layout.EEF6[h]])
+                T = anchor[h] @ delta_T
+                targets[h] = self._smoother[h].filter(T, self.dt)
+                tgt_pos[h][k] = targets[h][:3, 3]
+            out[k, ARM] = self.kin.solve(targets)
+            slot_err[k] = max(self.kin.tracking_error(targets).values())
+            for h in relation_layout.HANDS:
+                raw_grip = float(row[relation_layout.GRIP[h]][0])
+                frac = float(np.clip((raw_grip + 1.0) / 2.0, 0.0, 1.0))
+                out[k, HAND[h]] = frac * self.closed_pose[h]
+        self.last_targets = tgt_pos
+        self.last_slot_errors = slot_err
+        self.last_tracking_error = float(slot_err.max()) if len(slot_err) else 0.0
+        return out
+
+    def reset(self) -> None:
+        """Episode start / after an e-stop: clear all causal filter state so the
+        first chunk is not blended with a stale trajectory."""
+        for s in self._smoother.values():
+            s.reset()
+        self.kin.reset()
+
+
 def make_converter(action_mode: str, **kwargs):
     if action_mode == "joint":
         return JointChunks()
     if action_mode == "relative_eef":
         return RelativeEEFChunks(**kwargs)
+    if action_mode == "relation_eef":
+        return RelativeEEFRotvecChunks(**kwargs)
     raise ValueError(f"unknown action mode {action_mode!r} "
-                     "(expected 'joint' or 'relative_eef')")
+                     "(expected 'joint', 'relative_eef', or 'relation_eef')")
