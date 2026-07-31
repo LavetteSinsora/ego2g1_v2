@@ -17,12 +17,36 @@ owns image I/O -- capture the pairs however is convenient (this repo's
 consumes already-saved images.
 """
 
+import dataclasses
 import glob
 import os
 
 import numpy as np
 
 from .depth import StereoCalibration
+
+# Below this many successfully-detected views, cv2.calibrateCamera is known
+# to silently return physically nonsensical intrinsics (severely
+# underconstrained focal length / principal point) rather than raising --
+# OpenCV's own calibration tutorials recommend 10-20 well-varied views;
+# this is a conservative floor for "don't even provisionally trust it",
+# not a claim that this many guarantees a good result.
+MIN_RECOMMENDED_VIEWS = 8
+
+
+@dataclasses.dataclass
+class CalibrationReport:
+    """What actually happened during a `calibrate_from_image_pairs` solve --
+    surfaced because the previous version of this tool printed `len(pairs)`
+    (images GIVEN) where it meant `n_found` (images the board was actually
+    detected in), silently hiding a garbage-in-garbage-out failure mode."""
+
+    n_given: int
+    n_found: int
+    failed_indices: tuple[int, ...]
+    rms_left_px: float
+    rms_right_px: float
+    rms_stereo_px: float
 
 
 def _object_points(board_size: tuple[int, int], square_size_m: float) -> np.ndarray:
@@ -57,8 +81,18 @@ def calibrate_from_image_pairs(
                     corner-labeling ambiguity `cv2` cannot resolve on its own.
     square_size_m:  physical edge length of one checker square, metres.
 
-    Returns the `StereoCalibration` `depth.py`'s `StereoSGBMDepthSource`
-    consumes (K_left, K_right, dist_left, dist_right, R, T, image_size).
+    Returns `(StereoCalibration, CalibrationReport)` -- the report carries
+    exactly how many of the GIVEN pairs actually had the board detected in
+    BOTH eyes (`n_found`/`n_given`), which frames failed and why (mask not
+    found vs. size mismatch), and the mean per-view reprojection error
+    (pixels) each stage's own solve reports -- all of it load-bearing for
+    catching a garbage calibration BEFORE it gets trusted downstream. A
+    calibration solved from too few views is a well-known OpenCV failure
+    mode: with only a handful of poorly-varied detections, focal length and
+    principal point are severely underconstrained and `cv2.calibrateCamera`
+    will still return SOME numbers -- often wildly asymmetric fx/fy, huge
+    reprojection error, or a nonsensical baseline -- with no exception
+    raised. Silence here is exactly how that goes undiagnosed.
 
     Pipeline (the standard two-stage pattern, e.g. OpenCV's own
     stereo_calib.cpp sample): per-eye `cv2.calibrateCamera` for an intrinsic
@@ -82,7 +116,7 @@ def calibrate_from_image_pairs(
 
     obj_points, img_points_l, img_points_r = [], [], []
     image_size = None
-    n_found = 0
+    failed_indices: list[int] = []
 
     for i, (left, right) in enumerate(pairs):
         left = np.asarray(left)
@@ -108,8 +142,8 @@ def calibrate_from_image_pairs(
         ok_l, corners_l = cv2.findChessboardCorners(gray_l, (cols, rows))
         ok_r, corners_r = cv2.findChessboardCorners(gray_r, (cols, rows))
         if not (ok_l and ok_r):
+            failed_indices.append(i)
             continue
-        n_found += 1
 
         corners_l = cv2.cornerSubPix(gray_l, corners_l, (11, 11), (-1, -1), criteria)
         corners_r = cv2.cornerSubPix(gray_r, corners_r, (11, 11), (-1, -1), criteria)
@@ -118,22 +152,32 @@ def calibrate_from_image_pairs(
         img_points_l.append(corners_l)
         img_points_r.append(corners_r)
 
+    n_found = len(obj_points)
     if n_found == 0:
         raise ValueError(
             f"checkerboard ({cols}x{rows} inner corners) not found in both eyes "
             f"of any of the {len(pairs)} pair(s) given"
         )
+    if n_found < MIN_RECOMMENDED_VIEWS:
+        print(
+            f"WARNING: the board was only detected in {n_found}/{len(pairs)} pair(s) "
+            f"(failed: {failed_indices}) -- {MIN_RECOMMENDED_VIEWS}+ well-varied views "
+            "are recommended. With this few, cv2.calibrateCamera is known to return "
+            "physically nonsensical numbers (wildly asymmetric fx/fy, a nonsensical "
+            "baseline) WITHOUT raising an error -- treat this calibration as "
+            "provisional and check the reprojection error below before trusting it."
+        )
 
-    _, K_l, dist_l, _, _ = cv2.calibrateCamera(obj_points, img_points_l, image_size, None, None)
-    _, K_r, dist_r, _, _ = cv2.calibrateCamera(obj_points, img_points_r, image_size, None, None)
+    rms_l, K_l, dist_l, _, _ = cv2.calibrateCamera(obj_points, img_points_l, image_size, None, None)
+    rms_r, K_r, dist_r, _, _ = cv2.calibrateCamera(obj_points, img_points_r, image_size, None, None)
 
-    _, K_l, dist_l, K_r, dist_r, R, T, _, _ = cv2.stereoCalibrate(
+    rms_stereo, K_l, dist_l, K_r, dist_r, R, T, _, _ = cv2.stereoCalibrate(
         obj_points, img_points_l, img_points_r,
         K_l, dist_l, K_r, dist_r, image_size,
         criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC,
     )
 
-    return StereoCalibration(
+    calib = StereoCalibration(
         K_left=K_l,
         K_right=K_r,
         dist_left=dist_l.flatten(),
@@ -142,6 +186,15 @@ def calibrate_from_image_pairs(
         T=T.flatten(),
         image_size=image_size,
     )
+    report = CalibrationReport(
+        n_given=len(pairs),
+        n_found=n_found,
+        failed_indices=tuple(failed_indices),
+        rms_left_px=float(rms_l),
+        rms_right_px=float(rms_r),
+        rms_stereo_px=float(rms_stereo),
+    )
+    return calib, report
 
 
 def _cli_calibrate(
@@ -180,15 +233,39 @@ def _cli_calibrate(
         right = cv2.cvtColor(cv2.imread(rp), cv2.COLOR_BGR2RGB)
         pairs.append((left, right))
 
-    calib = calibrate_from_image_pairs(pairs, (cols, rows), square_size_m)
+    calib, report = calibrate_from_image_pairs(pairs, (cols, rows), square_size_m)
     calib.save(out_npz)
-    print(f"used {len(pairs)} pair(s)")
+
+    print(f"board found in {report.n_found}/{report.n_given} pair(s)")
+    if report.failed_indices:
+        failed_names = [os.path.basename(left_paths[i]) for i in report.failed_indices]
+        print(f"  NOT found in: {failed_names}")
+    print(f"reprojection error (px, lower is better -- <0.5 good, >1.0 suspect): "
+          f"left={report.rms_left_px:.3f} right={report.rms_right_px:.3f} "
+          f"stereo={report.rms_stereo_px:.3f}")
     print(f"baseline: {calib.baseline_m() * 1000:.1f} mm (datasheet nominal: 60 mm)")
     print(f"K_left:\n{calib.K_left}")
     print(f"K_right:\n{calib.K_right}")
     print(f"R (left->right):\n{calib.R}")
     print(f"T (left->right), mm: {calib.T * 1000}")
-    print(f"saved -> {out_npz}")
+
+    fx_l, fy_l = calib.K_left[0, 0], calib.K_left[1, 1]
+    suspect = (
+        report.n_found < MIN_RECOMMENDED_VIEWS
+        or report.rms_stereo_px > 1.0
+        or abs(fx_l / fy_l - 1.0) > 0.2
+    )
+    if suspect:
+        print(
+            "\nSUSPECT CALIBRATION -- do not trust this before investigating. "
+            f"fx/fy ratio (left) = {fx_l / fy_l:.2f} (should be close to 1.0 for "
+            "a real lens); a real camera's focal length is the same in both "
+            "directions, so a ratio far from 1.0, together with few detected "
+            f"views ({report.n_found}) and/or high reprojection error, means the "
+            "solve was underconstrained garbage, not a real measurement. See the "
+            "failed-pair list above and re-capture with more, more varied views."
+        )
+    print(f"saved -> {out_npz}  (SUSPECT, see above)" if suspect else f"saved -> {out_npz}")
 
 
 if __name__ == "__main__":

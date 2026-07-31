@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pytest
 
-from ego2g1.deploy.perception.stereo_calib import calibrate_from_image_pairs
+from ego2g1.deploy.perception.stereo_calib import MIN_RECOMMENDED_VIEWS, calibrate_from_image_pairs
 
 
 COLS, ROWS = 7, 6          # inner corners (must be non-square, see stereo_calib.py)
@@ -99,8 +99,10 @@ def _synthetic_pairs(n_poses=10, seed=42):
 
 def test_recovers_known_camera_model():
     pairs = _synthetic_pairs()
-    calib = calibrate_from_image_pairs(pairs, (COLS, ROWS), SQUARE_SIZE_M)
+    calib, report = calibrate_from_image_pairs(pairs, (COLS, ROWS), SQUARE_SIZE_M)
 
+    assert report.n_found == report.n_given == len(pairs)
+    assert report.failed_indices == ()
     assert calib.image_size == (IMG_W, IMG_H)
 
     # intrinsics: focal length within 5%, principal point within 6 px
@@ -153,5 +155,33 @@ def test_skips_pairs_missing_a_board_but_still_calibrates():
     blank = np.full((IMG_H, IMG_W, 3), 200, dtype=np.uint8)
     pairs_with_a_miss = [pairs[0], (blank, blank), *pairs[1:]]
 
-    calib = calibrate_from_image_pairs(pairs_with_a_miss, (COLS, ROWS), SQUARE_SIZE_M)
+    calib, report = calibrate_from_image_pairs(pairs_with_a_miss, (COLS, ROWS), SQUARE_SIZE_M)
     assert calib.K_left[0, 0] == pytest.approx(FX_TRUE, rel=0.1)
+    # the report must say what actually happened: 6 found out of 7 given,
+    # and name the ONE pair (index 1, the blank one) that failed -- this is
+    # exactly the visibility the old tool silently omitted (it printed
+    # len(pairs) where it meant n_found), which is what let a garbage,
+    # too-few-views calibration go unnoticed on real hardware.
+    assert report.n_given == 7
+    assert report.n_found == 6
+    assert report.failed_indices == (1,)
+
+
+def test_warns_on_too_few_views(capsys):
+    # A single view is a real, common failure mode (most captured pairs
+    # didn't actually have the board detected): cv2.calibrateCamera does NOT
+    # raise on this -- it silently returns severely underconstrained, often
+    # physically nonsensical intrinsics. This test guards against regressing
+    # the fix: the tool must WARN when n_found is below the recommended
+    # floor, not stay silent the way it originally did.
+    pairs = _synthetic_pairs(n_poses=1)
+    calib, report = calibrate_from_image_pairs(pairs, (COLS, ROWS), SQUARE_SIZE_M)
+
+    assert report.n_found == 1
+    assert report.rms_left_px >= 0.0
+    assert report.rms_stereo_px >= 0.0
+    assert report.n_found < MIN_RECOMMENDED_VIEWS
+
+    stderr_and_stdout = capsys.readouterr()
+    assert "WARNING" in stderr_and_stdout.out
+    assert "1/1" in stderr_and_stdout.out
