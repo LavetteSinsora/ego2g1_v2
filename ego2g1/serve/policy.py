@@ -61,13 +61,31 @@ def resolve_run_dir(checkpoint_dir: str | pathlib.Path) -> pathlib.Path:
     return checkpoint_dir  # let read_stamp raise its diagnostic
 
 
-def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig:
+def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig | _config.EgoRelationTrainConfig:
     """Rebuild the training config from a stamp (single source of truth).
     optimizer/lr_schedule are dropped (not needed at serving); JSON lists are
-    restored to the tuples the dataclass expects."""
+    restored to the tuples the dataclass expects.
+
+    Dispatches on stamp["config_class"] (ego2g1.train.stamp.write_stamp) to
+    build either Ego2G1TrainConfig (30-dim absolute) or EgoRelationTrainConfig
+    (relational state + 14-dim relative-EEF-rotvec actions). Checkpoints
+    stamped before "config_class" existed carry no such key — they predate
+    EgoRelationTrainConfig entirely, so they default to Ego2G1TrainConfig."""
     cfg_dict = dict(stamp["ego2g1_config"])
     for k in ("optimizer", "lr_schedule"):
         cfg_dict.pop(k, None)
+
+    config_class = stamp.get("config_class", "Ego2G1TrainConfig")
+    if config_class == "EgoRelationTrainConfig":
+        for k in ("hands", "val_source_episodes", "objects", "object_prompt_names"):
+            if k in cfg_dict and isinstance(cfg_dict[k], list):
+                cfg_dict[k] = tuple(cfg_dict[k])
+        # No legacy-default backfill here: every field EgoRelationTrainConfig's
+        # __post_init__ relies on (per_slot_center, model_space_clamp, ...) has
+        # carried a real default since this config family's introduction —
+        # there is no pre-EgoRelationTrainConfig checkpoint missing them.
+        return _config.EgoRelationTrainConfig(**cfg_dict)
+
     for k in ("hands", "val_real_episodes", "degenerate_dim_allowlist"):
         if k in cfg_dict and isinstance(cfg_dict[k], list):
             cfg_dict[k] = tuple(cfg_dict[k])
@@ -124,6 +142,54 @@ def resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir=None
     return pooled, per_slot
 
 
+def resolve_relation_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir=None) -> pathlib.Path:
+    """-> directory holding relation_stats.npz (ego2g1.train.norm.RELATION_FILENAME).
+
+    EgoRelationTrainConfig needs exactly one stats artifact (unlike the 30-dim
+    config's pooled/per-slot pair), so this returns a single directory. Mirrors
+    resolve_norm_assets' resolution order EXACTLY:
+    1. an explicit `assets_dir=` (caller knows best);
+    2. the checkpoint's OWN copy — train.py writes relation_stats.npz to
+       `<run>/assets_ego2g1/` (train.py:643, the same place save_per_slot writes
+       the 30-dim grid), so that is checked at both the step dir (in case a flat
+       copied-out checkpoint carries its own) and the run dir;
+    3. the training-time assets dir `<assets_base_dir>/<name>/<repo_id>` that
+       `compute_norm_stats --config relation` writes and train.py reads.
+       Used only when the checkpoint carries no copy — WARNS, because a live
+       assets dir may have been recomputed since training.
+    """
+    from ego2g1.train import norm as _norm
+
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    run_dir = pathlib.Path(run_dir)
+
+    if assets_dir is not None:
+        d = pathlib.Path(assets_dir)
+        if not (d / _norm.RELATION_FILENAME).exists():
+            raise FileNotFoundError(f"--assets-dir {d} is missing {_norm.RELATION_FILENAME}")
+        return d
+
+    own_ck = checkpoint_dir / "assets_ego2g1"
+    own_run = run_dir / "assets_ego2g1"
+    train_assets = train_config.assets_dirs / train_config.repo_id
+    searched = []
+
+    for d in (own_ck, own_run, train_assets):
+        searched.append(d / _norm.RELATION_FILENAME)
+        if (d / _norm.RELATION_FILENAME).exists():
+            if d == train_assets:
+                print(f"WARNING: falling back to the training assets dir {train_assets} (the checkpoint "
+                      "does not carry its own copy). Confirm these stats are the ones this checkpoint "
+                      "trained with — they are not pinned to it.")
+            return d
+
+    raise FileNotFoundError(
+        f"{_norm.RELATION_FILENAME} not found. Searched:\n  " + "\n  ".join(str(p) for p in searched) +
+        "\nRun `python -m ego2g1.train.compute_norm_stats --config relation` from the openpi root, "
+        "or pass --assets-dir."
+    )
+
+
 class Ego2G1Policy(_policy.Policy):
     """openpi Policy + RTC. Accepts optional `prev_chunk` / `d` in the request.
 
@@ -131,14 +197,28 @@ class Ego2G1Policy(_policy.Policy):
     flag), never by a user flag — so the robot client is identical whether the
     checkpoint wants guided or pinned RTC, and a future rtc_training retrain is
     a server-side swap the client never sees.
+
+    `relation_mode=True` (an EgoRelationTrainConfig checkpoint) disables the
+    RTC-prefix path with a loud NotImplementedError instead of silently running
+    it: the prefix's ride through the relational input-transform chain
+    (PerSlotQuantizeActions instead of PerSlotRescale, a differently-shaped
+    action space, gripper dims exempted differently) has never been verified
+    correct, and this codebase's whole stamping mechanism exists specifically
+    so an unverified serving path fails loud rather than silently wrong (see
+    module docstring). RTC-prefix support for relation checkpoints is out of
+    scope for this change (docs/relation_deploy_plan.md §8); only the plain
+    (no-prefix) path is supported here. The plain path itself is untouched —
+    `infer()`'s `sampler is PLAIN` branch calls `super().infer()` generically,
+    with no 30-dim-specific assumptions.
     """
 
     def __init__(self, model, *, rtc: _rtc.RTCConfig, rtc_training: bool,
-                 action_horizon: int, **kwargs):
+                 action_horizon: int, relation_mode: bool = False, **kwargs):
         super().__init__(model, **kwargs)
         self._rtc = rtc
         self._rtc_training = rtc_training
         self._action_horizon = action_horizon
+        self._relation_mode = relation_mode
 
         self._sample_guided = nnx_utils.module_jit(
             model.sample_actions_guided,
@@ -163,6 +243,12 @@ class Ego2G1Policy(_policy.Policy):
         d = int(np.clip(d, 0, max(0, n_real - 1)))
 
         has_prefix = prev_chunk is not None and n_real > 0
+        if has_prefix and self._relation_mode:
+            raise NotImplementedError(
+                "RTC prefix continuation is not implemented for relational "
+                "(EgoRelationTrainConfig) checkpoints — only the plain (no-prefix) "
+                "sampler is supported. See docs/relation_deploy_plan.md §8."
+            )
         sampler = _rtc.select_sampler(
             rtc_training=self._rtc_training,
             has_prefix=has_prefix,
@@ -221,6 +307,17 @@ class Ego2G1Policy(_policy.Policy):
         return outputs
 
 
+# Metadata sentinel for an EgoRelationTrainConfig checkpoint's control_mode. The
+# 30-dim config's control_mode metadata mirrors train_config.control_mode
+# verbatim (CONTROL_MODE_EEF="end effector" or CONTROL_MODE_JOINT="joint" —
+# ego2g1.train.transforms), so this must not collide with either: the relation
+# config's own control_mode field holds the SAME "end effector"/"joint" string
+# (it is embedded in the prompt marker), but the metadata key must instead
+# signal the 14-dim relational action space to the client, distinctly from the
+# 30-dim scheme's two existing values.
+RELATION_CONTROL_MODE_METADATA = "relation_eef"
+
+
 def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | None = None,
                   assets_dir: str | pathlib.Path | None = None,
                   rtc: _rtc.RTCConfig | None = None) -> Ego2G1Policy:
@@ -233,54 +330,102 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
 
     model = model_config.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
 
-    pooled_dir, per_slot_dir = resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
-    data_cfg = _data_config.create_data_config(
-        train_config, model_config, norm_assets_dir=pooled_dir, per_slot_dir=per_slot_dir,
-        # a blind checkpoint (state_dropout_p >= 1.0) never saw a state digit and
-        # must not be shown one; a dropout checkpoint is served WITH the real state.
-        state_mode=_data_config.serve_state_mode(train_config),
-    )
-
     import openpi.transforms as transforms
 
     rtc = rtc if rtc is not None else _rtc.RTCConfig()
+    is_relation = isinstance(train_config, _config.EgoRelationTrainConfig)
+
+    if is_relation:
+        stats_dir = resolve_relation_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
+        data_cfg = _data_config.create_relation_data_config(
+            train_config, model_config, stats_dir=stats_dir,
+            # serving must be deterministic — only TRAINING shuffles object order.
+            shuffle_objects=False,
+        )
+        # create_relation_data_config returns norm_stats={} BY DESIGN (see its
+        # docstring): the real normalization (NormalizeRelations,
+        # PerSlotQuantizeActions/Inverse) already lives inside
+        # model_transforms.inputs/outputs, so Normalize/Unnormalize must NOT be
+        # inserted here — they would be dead weight at best (norm_stats={} makes
+        # them a no-op) and a silent double-normalization bug at worst if that
+        # docstring's contract ever changes without this file being updated.
+        policy_transforms = [
+            transforms.InjectDefaultPrompt(default_prompt),
+            *data_cfg.data_transforms.inputs,
+            *data_cfg.model_transforms.inputs,
+        ]
+        policy_output_transforms = [
+            *data_cfg.model_transforms.outputs,
+            *data_cfg.data_transforms.outputs,
+        ]
+        ego_metadata = {
+            "hands": list(train_config.hands),
+            "action_horizon": train_config.action_horizon,
+            "action_dim": train_config.action_dim_actual,
+            "fps": train_config.fps,
+            "control_mode": RELATION_CONTROL_MODE_METADATA,
+            "rtc_training": bool(train_config.rtc_training),
+            "rtc": {
+                "enabled": rtc.enabled,
+                "overlap": rtc.overlap,
+                "max_guidance_weight": rtc.max_guidance_weight,
+                "schedule": rtc.prefix_attention_schedule.value,
+                "use_vjp": rtc.use_vjp,
+                "num_steps": rtc.num_steps,
+            },
+            "objects": list(train_config.objects),
+            "object_prompt_names": list(train_config.object_prompt_names),
+            "n_objects": train_config.n_objects,
+        }
+    else:
+        pooled_dir, per_slot_dir = resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
+        data_cfg = _data_config.create_data_config(
+            train_config, model_config, norm_assets_dir=pooled_dir, per_slot_dir=per_slot_dir,
+            # a blind checkpoint (state_dropout_p >= 1.0) never saw a state digit and
+            # must not be shown one; a dropout checkpoint is served WITH the real state.
+            state_mode=_data_config.serve_state_mode(train_config),
+        )
+        policy_transforms = [
+            transforms.InjectDefaultPrompt(default_prompt),
+            *data_cfg.data_transforms.inputs,
+            transforms.Normalize(data_cfg.norm_stats, use_quantiles=data_cfg.use_quantile_norm),
+            *data_cfg.model_transforms.inputs,
+        ]
+        policy_output_transforms = [
+            *data_cfg.model_transforms.outputs,
+            transforms.Unnormalize(data_cfg.norm_stats, use_quantiles=data_cfg.use_quantile_norm),
+            *data_cfg.data_transforms.outputs,
+        ]
+        ego_metadata = {
+            "hands": list(train_config.hands),
+            "action_horizon": train_config.action_horizon,
+            "action_dim": train_config.action_dim_actual,
+            "fps": train_config.fps,
+            "control_mode": train_config.control_mode,
+            "rtc_training": bool(train_config.rtc_training),
+            "rtc": {
+                "enabled": rtc.enabled,
+                "overlap": rtc.overlap,
+                "max_guidance_weight": rtc.max_guidance_weight,
+                "schedule": rtc.prefix_attention_schedule.value,
+                "use_vjp": rtc.use_vjp,
+                "num_steps": rtc.num_steps,
+            },
+        }
 
     return Ego2G1Policy(
         model,
         rtc=rtc,
         rtc_training=bool(train_config.rtc_training),
         action_horizon=train_config.action_horizon,
-        transforms=[
-            transforms.InjectDefaultPrompt(default_prompt),
-            *data_cfg.data_transforms.inputs,
-            transforms.Normalize(data_cfg.norm_stats, use_quantiles=data_cfg.use_quantile_norm),
-            *data_cfg.model_transforms.inputs,
-        ],
-        output_transforms=[
-            *data_cfg.model_transforms.outputs,
-            transforms.Unnormalize(data_cfg.norm_stats, use_quantiles=data_cfg.use_quantile_norm),
-            *data_cfg.data_transforms.outputs,
-        ],
+        relation_mode=is_relation,
+        transforms=policy_transforms,
+        output_transforms=policy_output_transforms,
         metadata={
             "ego2g1_stamp": {k: stamp[k] for k in ("feature_flags", "ego2g1_config_hash",
                                                     "extraction_config_hash", "openpi_commit")},
             # The client reads its layout from here instead of importing ego2g1.config
             # (which pulls in JAX). Keeps the robot PC config-free.
-            "ego2g1": {
-                "hands": list(train_config.hands),
-                "action_horizon": train_config.action_horizon,
-                "action_dim": train_config.action_dim_actual,
-                "fps": train_config.fps,
-                "control_mode": train_config.control_mode,
-                "rtc_training": bool(train_config.rtc_training),
-                "rtc": {
-                    "enabled": rtc.enabled,
-                    "overlap": rtc.overlap,
-                    "max_guidance_weight": rtc.max_guidance_weight,
-                    "schedule": rtc.prefix_attention_schedule.value,
-                    "use_vjp": rtc.use_vjp,
-                    "num_steps": rtc.num_steps,
-                },
-            },
+            "ego2g1": ego_metadata,
         },
     )

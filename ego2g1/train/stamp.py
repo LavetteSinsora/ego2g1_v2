@@ -61,6 +61,12 @@ def write_stamp(checkpoint_dir, train_config, extraction_config_hash: str | None
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     openpi_root = pathlib.Path(__file__).resolve().parent.parent
     stamp = {
+        # Which train_config dataclass this checkpoint was built from
+        # (Ego2G1TrainConfig vs EgoRelationTrainConfig) — config_from_stamp
+        # dispatches on this. Absent on checkpoints written before this field
+        # existed; those are all Ego2G1TrainConfig (EgoRelationTrainConfig did
+        # not exist yet), so the reader defaults missing keys to that name.
+        "config_class": type(train_config).__name__,
         "feature_flags": train_config.feature_flags(),
         "ego2g1_config": dataclasses.asdict(train_config),
         "ego2g1_config_hash": train_config.config_hash(),
