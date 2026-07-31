@@ -60,6 +60,19 @@ flange orientation. That single open risk is called out explicitly in
    (hardware bring-up rungs), each gated by tests before the next starts.
    Implementation to be parallelized across subagents once you confirm this
    doc; §9 is the literal task list.
+5. **Where the detector runs (2026-07-31)**: a local 4090 is the deployment
+   machine — `GroundingDinoSam2Detector` is constructed IN-PROCESS, directly
+   inside `ego2g1.deploy.runner`'s loop on that machine, not as a separate
+   network service. This is simpler than policy serving's PPU-over-websocket
+   pattern precisely because the GPU is local to the loop that needs it; do
+   not build a remote-perception protocol unless this stops being true.
+   Consequence, already fixed in code: `RelationPerception.observe()`
+   originally called the detector every tick (fine with the `FakeDetector`
+   every test used, wrong against a real GPU call) — it now gates both the
+   detector and depth-estimate calls behind `detector_period_ticks`
+   (default ~2 Hz at 30 fps, §5.3's own cadence), letting the tracker
+   predict/extrapolate on every tick in between, same as the plan always
+   intended.
 
 ## 2. Current-state map (context subagents need, so they don't re-derive it)
 
