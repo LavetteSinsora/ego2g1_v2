@@ -272,27 +272,50 @@ def _tcp_check_configs() -> list[tuple[str, dict]]:
 #   meaning ("forward", i.e. fingers direction) common to both hands, given
 #   `_palm_frame`'s own left/right `across` sign flip.
 #
-# NOT independently confirmed here (flag, don't assert): which physical side
-# of the palm plane "normal"/TCP+Y actually faces (into the palm vs. out of
-# it) depends on hand-landmark index conventions in files this rung did not
-# read (pico.py's XR_* landmark layout) — "INWARD_PALM" suggests an intended
-# direction, but this rung does not verify the sign, only the axis identity.
-# That is exactly the kind of thing a human should eyeball, not assume.
+# TCP +Z, re-derived directly from `_palm_frame`'s algebra (not guessed):
+# `across` (right hand) = index_knuckle - pinky_knuckle, i.e. it POINTS FROM
+# pinky TOWARD index. `lateral = cross(normal, forward)` is, by the BAC-CAB
+# identity ((forward x across) x forward = across - (across.forward)forward),
+# exactly `across` with its forward-component removed — i.e. lateral points
+# the SAME direction as `across`: pinky -> index, for the right hand.
+# `TCP_TO_INWARD_PALM["right"]` row 2 = [0,1,0] -> TCP+Z = +lateral = pinky ->
+# index. For the left hand `across` is defined with the opposite sign
+# (pinky_knuckle - index_knuckle, i.e. index -> pinky) AND
+# TCP_TO_INWARD_PALM["left"] row 2 = [0,-1,0] -> TCP+Z = -lateral = -(index ->
+# pinky) = pinky -> index again — the two per-hand sign choices are exactly
+# what keeps TCP+Z meaning the SAME physical direction (pinky-side toward
+# index/thumb-side) on both hands, mirroring how row 0 keeps TCP+X meaning
+# "forward" on both hands. So TCP+Z is "pinky -> index", NOT "thumb -> pinky"
+# — an earlier version of this rung had this backwards; if you see a printed
+# "TCP +Z" axis pointing opposite to a naive "thumb toward pinky" read of the
+# real hand, that is expected, not a bug (empirically confirmed against the
+# real right hand at ready pose, 2026-07-31: predicted "up" via the OLD wrong
+# label matched a real "down" thumb->pinky sweep exactly as this correction
+# predicts).
+#
+# TCP +Y sign: empirically corroborated (not merely asserted) against the
+# real right hand at ready pose, 2026-07-31 — predicted "robot-left", and the
+# operator confirmed the hand orientation matches "toward the robot's own
+# base," i.e. inward/robot-left. Re-check if a later observation on either
+# hand disagrees; this was one data point (right hand only).
 _TCP_AXIS_MEANING = [
     "fingers-forward: wrist -> middle-finger-knuckle direction (TCP +X, "
     "both hands)",
-    "palm-plane normal, 'INWARD_PALM' per the convention's name — sign "
-    "(into vs. out of the palm) NOT independently confirmed by this rung "
-    "(TCP +Y, both hands after the per-side sign flip in TCP_TO_INWARD_PALM)",
-    "across-palm / lateral (thumb<->pinky) direction (TCP +Z, both hands "
-    "after the per-side sign flip in TCP_TO_INWARD_PALM)",
+    "palm-plane normal, 'INWARD_PALM' per the convention's name — points "
+    "toward the robot's own body/base (empirically confirmed on the real "
+    "right hand at ready pose, 2026-07-31; TCP +Y, both hands after the "
+    "per-side sign flip in TCP_TO_INWARD_PALM)",
+    "pinky-knuckle -> index-knuckle direction (re-derived from "
+    "_palm_frame's algebra, NOT 'thumb-to-pinky' — see the comment above "
+    "this list; TCP +Z, both hands after the per-side sign flip in "
+    "TCP_TO_INWARD_PALM)",
 ]
 # Short forms of the above for the per-config, per-axis print lines (the full
 # sentence is already printed once, in the header).
 _TCP_AXIS_SHORT = [
     "fingers-forward, TCP +X",
-    "palm-normal ('INWARD_PALM', sign unconfirmed), TCP +Y",
-    "across-palm/lateral, TCP +Z",
+    "palm-normal (toward robot base, confirmed), TCP +Y",
+    "pinky-knuckle->index-knuckle, TCP +Z",
 ]
 
 
