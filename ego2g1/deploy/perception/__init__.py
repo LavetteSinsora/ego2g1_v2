@@ -38,10 +38,12 @@ Module map (docs/relation_deploy_plan.md §9):
   latch          per-hand grasp-confirmation state machine (§5.4, task 9) --
                  pure numpy, no camera/detector/robot dependency, testable
                  in full isolation with synthetic trajectories. Implemented.
-  (none yet)     RelationPerception.observe(...): the integration glue
-                 wiring all of the above into one 56-dim relation vector
-                 per tick (§5.5, task 10). Not yet -- the modules above are
-                 independently built and tested; nothing wires them
-                 together end to end yet.
+  relation_perception   `RelationPerception.observe(...)`: the integration
+                 glue wiring all of the above into one 56-dim relation
+                 vector per tick (§5.5, task 10). Implemented, and wired
+                 into `ego2g1.deploy.policy_adapter.RelationPolicyAdapter`
+                 via its `perception=` constructor arg; `ego2g1.deploy.runner
+                 .main()` constructs the real detector/depth stack and
+                 passes it through for the `relation_eef` CLI entrypoint.
   gripper_calib  see `ego2g1.deploy.gripper_calib` (top-level, not here).
 """

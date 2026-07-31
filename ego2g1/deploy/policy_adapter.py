@@ -248,6 +248,16 @@ class RelationPolicyAdapter:
     def last_tracking_error(self) -> float:
         return self._converter.last_tracking_error
 
+    @property
+    def closed_pose(self) -> dict:
+        """The converter's per-hand `BRAINCO_CLOSED_POSE`-shaped (6,) array
+        (`ego2g1.deploy.gripper_calib`, possibly overridden at construction).
+        Surfaced so `runner.py` can recover the scalar open/closed fraction
+        from an executed 6-motor command (`gripper_calib.frac_from_command`)
+        for the NEXT tick's `hand_cmds_last`, without reaching into the
+        converter's private internals directly."""
+        return self._converter.closed_pose
+
     def infer(self, request: dict) -> dict:
         arm_q = np.asarray(request["arm_q"], dtype=np.float64)
         hand_cmds = request["hand_cmds"]
