@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import importlib.util
 import logging
+import math
 import pathlib
 import sys
 
@@ -557,11 +558,19 @@ def relation_train_step(
     }
     if "grasp_bce" in aux:
         info["loss/grasp_bce"] = aux["grasp_bce"]
-    if "injected_norm" in aux:
-        # The injection canary. Ratio O(1) is healthy; see relation.py safeguards.
-        info["relation/injected_norm"] = aux["injected_norm"]
+    if "delta_norm" in aux:
+        # The injection canaries. rotation_deg is THE one to watch: gemma.RMSNorm
+        # keeps only direction, so rotation is the injection's entire effect.
+        # Healthy = arctan(alpha) ~ 45 deg at alpha=1. relation_v1 sat at 0.2 deg
+        # for 10k steps and every downstream metric was measured on a policy that
+        # could not see object geometry.
+        info["relation/rotation_deg"] = aux["rotation_deg"]
+        info["relation/token_sep_deg"] = aux["token_sep_deg"]   # objects distinguishable?
+        info["relation/delta_sep_deg"] = aux["delta_sep_deg"]   # encoder collapsed?
+        info["relation/alpha"] = aux["alpha"]
+        info["relation/base_norm"] = aux["base_norm"]
+        info["relation/delta_norm"] = aux["delta_norm"]
         info["relation/text_norm"] = aux["text_norm"]
-        info["relation/norm_ratio"] = aux["injected_norm"] / jnp.maximum(aux["text_norm"], 1e-6)
     return new_state, info
 
 
@@ -589,18 +598,12 @@ def main_relation(config: _config.EgoRelationTrainConfig):
     model_config = dataclasses.replace(model_config_base, loss_dim_weights=weights)
     logging.info(f"loss_dim_weights (mean 1): {[round(w, 4) for w in weights]}")
 
-    # Safeguard 2's target, resolved HERE and nowhere else. It has to be a
-    # concrete float taken from the PRETRAINED table: the model is constructed
-    # under jax.eval_shape (tracers) and before the weight loader runs, so it
-    # cannot measure this itself. Cached beside the params, so the 12 GB restore
-    # happens once per checkpoint, not once per run.
+    # Safeguard 2 needs no resolution step any more: the injection is sized
+    # relative to the sentinel embedding, read live inside embed_prefix. The
+    # offline measurement this replaces is what broke relation_v1.
     if config.n_objects:
-        target_norm = config.relation_target_norm
-        if target_norm is None:
-            logging.info("measuring PaliGemma embedding norm (once per checkpoint; cached)...")
-            target_norm = _relation.paligemma_embedding_norm(config.weight_loader_params_path)
-        model_config = dataclasses.replace(model_config, relation_target_norm=target_norm)
-        logging.info(f"relation_target_norm: {target_norm:.4f} (post-sqrt(width) token scale)")
+        logging.info(f"relation alpha (injection size as a fraction of the base): "
+                     f"{config.relation_alpha} -> {math.degrees(math.atan(config.relation_alpha)):.1f} deg rotation")
 
     data_cfg = _data_config.create_relation_data_config(
         config, model_config, stats_dir=stats_dir, shuffle_objects=config.shuffle_object_order,

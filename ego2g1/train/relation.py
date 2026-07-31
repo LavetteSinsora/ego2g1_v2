@@ -13,17 +13,24 @@ safeguards, all on by default:
 
 1. GeGLU, matching Gemma's own FFN nonlinearity, so the encoder is at least
    stylistically the same kind of function as the blocks that will read it.
-2. Output RMSNorm with a learned scale INITIALIZED to the mean L2 norm of the
-   PaliGemma token-embedding table. The injected token therefore starts life at
-   the same magnitude as a real word.
+2. Output RMSNorm, then a scale set RELATIVE to the embedding being injected
+   into: `alpha * ||base||`, with ||base|| read live from the token stream at
+   injection time. alpha is a dimensionless learned scalar, so "how hard am I
+   perturbing this token" is a number you can read off directly.
 3. Final projection ZERO-initialized, so at step 0 the injected embedding is
    exactly zero and the model is bit-identical to one that ignores the object
    vectors. It has to learn to use them; nothing is injected into a pretrained
    circuit before the gradient asks for it.
 
-`embedding_norm_ratio` is the training canary for (2) and (3): injected-token
-norm over mean text-token norm. Order 1 is healthy; orders of magnitude apart
-means the encoder is either being ignored or shouting.
+Safeguard 2 was originally an ABSOLUTE target measured offline from the
+pretrained checkpoint, and that is what broke relation_v1 -- see RelationEncoder
+for the post-mortem. The relative form cannot fail the same way.
+
+`relation/rotation_deg` is the training canary. Because gemma.RMSNorm discards
+per-token magnitude and keeps only DIRECTION, the injection's only possible
+effect is to rotate the token it is added to; the norms themselves are a means,
+not the end. arctan(alpha) is the healthy value; near 0 means the geometry never
+reaches attention.
 """
 
 import flax.nnx as nnx
@@ -77,19 +84,43 @@ class RelationEncoder(nnx.Module):
     """
 
     def __init__(self, relation_dim: int, hidden: int, width: int, *, rngs: nnx.Rngs,
-                 target_norm: float = 1.0):
+                 alpha_init: float = 1.0):
         self.mlp = GeGLU(relation_dim, hidden, width, rngs=rngs, zero_init_out=True)
-        # RMSNorm with a learned per-channel scale, initialized so a unit-RMS
-        # input maps to `target_norm` total L2 norm (safeguard 2). RMS -> L2 is
-        # a factor of sqrt(width), hence the division.
-        self.scale = nnx.Param(jnp.full((width,), target_norm / jnp.sqrt(width), dtype=jnp.float32))
+        # Safeguard 2, RELATIVE form. `alpha` is the injected token's size as a
+        # FRACTION of the embedding it is added to, and the size of that embedding
+        # is read live at injection time (see Ego2G1Pi0.embed_prefix) rather than
+        # measured offline from the checkpoint.
+        #
+        # The offline route is what broke relation_v1: it returned 1.63 where the
+        # sentinel's embedding is 487.76, so the injection rotated the token by
+        # 0.2 deg and the three objects arrived at cosine 0.99999 -- identical, to
+        # the transformer. Nothing could recover it, because growing a scale 284x
+        # is a MULTIPLICATIVE correction driven by additive SGD steps whose
+        # gradient is itself tiny precisely because the injection is tiny. The
+        # trained checkpoint shows the per-channel mean moved 0.6% in 10k steps.
+        #
+        # Reading the base live makes that class of error impossible: the target
+        # and the thing it is compared against are the same tensor. alpha is a
+        # dimensionless scalar, so a wrong value is visible by inspection.
+        self.alpha = nnx.Param(jnp.asarray(alpha_init, dtype=jnp.float32))
         self.width = width
 
-    def __call__(self, relations):
+    def __call__(self, relations, base_norm):
+        """relations (*b, n, relation_dim), base_norm scalar -> (*b, n, width).
+
+        `base_norm` is the L2 norm of the embedding this output will be ADDED to
+        (the sentinel's, already scaled by Embedder.encode's sqrt(embed_dim)).
+        """
         x = self.mlp(relations)
-        # RMSNorm (no mean subtraction, matching gemma.RMSNorm) then learned scale.
+        # RMSNorm (no mean subtraction, matching gemma.RMSNorm). A unit-RMS vector
+        # has L2 = sqrt(width), NOT 1 -- hence the division below, which is purely
+        # an RMS->L2 unit conversion and is unrelated to Embedder.encode's own
+        # sqrt(embed_dim) despite being the same number.
         rms = jnp.sqrt(jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True) + 1e-6)
-        return (x / rms) * self.scale.value
+        gain = self.alpha.value * base_norm / jnp.sqrt(self.width)
+        # zero_init_out means x == 0 exactly at step 0, so rms -> sqrt(1e-6) and the
+        # output is still exactly 0: safeguard 3 survives unchanged.
+        return (x / rms) * gain
 
 
 class GraspHead(nnx.Module):
@@ -132,87 +163,6 @@ class GraspHead(nnx.Module):
         pooled = jnp.sum(weights * prefix_out, axis=-2)               # (b, width)
         logits = self.mlp(pooled)                                     # (b, H*n_hands)
         return logits.reshape(logits.shape[0], self.action_horizon, self.n_hands)
-
-
-def _find_embedding_table(tree):
-    """Depth-first search for the `input_embedding` leaf.
-
-    Searched by NAME rather than by a fixed path: the checkpoint tree and the
-    live nnx tree nest it differently (`PaliGemma/llm/embedder/...` vs
-    `embedder/...`), and the path is not part of any contract we control.
-    """
-    if isinstance(tree, dict):
-        if "input_embedding" in tree and not isinstance(tree["input_embedding"], dict):
-            return tree["input_embedding"]
-        for value in tree.values():
-            found = _find_embedding_table(value)
-            if found is not None:
-                return found
-    return None
-
-
-def paligemma_embedding_norm(params_path: str) -> float:
-    """Mean L2 norm of a PRETRAINED PaliGemma token embedding AS IT ENTERS the
-    residual stream — the target injected relation tokens are scaled to match
-    (safeguard 2).
-
-    Reads the checkpoint on disk. It must, for three separate reasons, all of
-    which were wrong when this read the live nnx param tree from
-    `Ego2G1Pi0.__init__`:
-
-    1. It has to run OUTSIDE a trace. `__init__` executes under
-       `jax.eval_shape`, where every leaf is an abstract tracer and `float()`
-       raises ConcretizationTypeError.
-    2. It has to read the PRETRAINED table. `__init__` runs before the weight
-       loader, so the live tree there holds nnx's random init, not pi05_base —
-       it would have returned a number describing noise.
-    3. It has to include `gemma.Embedder.encode`'s `x *= sqrt(embed_dim)`
-       (gemma.py:150). Tokens reach the stream sqrt(2048) ~= 45x larger than
-       their table rows, and `embed_prefix` adds the relation delta AFTER that
-       scaling. Matching the raw row norm would inject a token ~45x too small —
-       exactly the "attention ignores it, expensive no-op" failure this
-       safeguard exists to prevent.
-
-    Cached next to the params, keyed by path: the value is a constant of the
-    pretrained checkpoint, and restoring 12+ GB to read one array is not
-    something to repeat every run.
-    """
-    import json
-    import pathlib
-
-    import numpy as np
-
-    import openpi.models.model as _model_mod
-    import openpi.shared.download as _download
-
-    local = _download.maybe_download(params_path)
-    cache = pathlib.Path(local).parent / "ego2g1_embedding_norm.json"
-    key = str(params_path)
-    if cache.exists():
-        try:
-            hit = json.loads(cache.read_text()).get(key)
-            if hit is not None:
-                return float(hit)
-        except (ValueError, OSError):
-            pass  # unreadable cache is not a reason to fail; just re-measure
-
-    params = _model_mod.restore_params(local, restore_type=np.ndarray)
-    table = _find_embedding_table(params)
-    if table is None:
-        raise ValueError(f"no `input_embedding` leaf in the params at {params_path}")
-    table = np.asarray(table, dtype=np.float32)
-    row_norm = float(np.mean(np.linalg.norm(table, axis=-1)))
-    width = table.shape[-1]
-    del params, table
-    value = row_norm * float(np.sqrt(width))
-
-    try:
-        existing = json.loads(cache.read_text()) if cache.exists() else {}
-        existing[key] = value
-        cache.write_text(json.dumps(existing, indent=1))
-    except OSError:
-        pass  # a read-only asset cache just means we measure again next run
-    return value
 
 
 @at.typecheck

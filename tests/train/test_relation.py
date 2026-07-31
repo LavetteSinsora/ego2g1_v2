@@ -367,10 +367,12 @@ def test_injection_touches_exactly_the_sentinel_slots():
     changed = np.flatnonzero(np.asarray(jnp.abs(got - base).sum(-1) > 1e-6)[0])
     text_start = base.shape[1] - obs.tokenized_prompt.shape[1]
     np.testing.assert_array_equal(changed - text_start, np.array([5, 9, 13]))
-    # residual, not overwrite: the delta equals the encoder rows
+    # residual, not overwrite: the delta equals the encoder rows, evaluated at the
+    # same live base norm embed_prefix uses
     np.testing.assert_allclose(
         np.asarray((got - base)[0, changed, :]),
-        np.asarray(m.relation_encoder(obs.relations)[0]), atol=1e-5,
+        np.asarray(m.relation_encoder(obs.relations, m.sentinel_base_norm(base, obs))[0]),
+        atol=1e-5,
     )
 
 
@@ -412,10 +414,15 @@ def test_compute_loss_with_aux_produces_grasp_terms_and_gradients():
     obs, act = _obs_with_sentinels(cfg), cfg.fake_act(2)
     chunked, aux = m.compute_loss_with_aux(jax.random.key(1), obs, act, gripper_dims=(12, 13))
     assert chunked.shape == (2, 8)
-    assert {"grasp_bce", "grasp_logits", "injected_norm", "text_norm"} <= set(aux)
+    assert {"grasp_bce", "grasp_logits", "text_norm", "base_norm", "delta_norm",
+            "alpha", "rotation_deg", "token_sep_deg", "delta_sep_deg"} <= set(aux)
     assert aux["grasp_logits"].shape == (2, 8, 2)
-    assert float(aux["injected_norm"]) == 0.0          # zero-init
+    assert float(aux["delta_norm"]) == 0.0             # zero-init
+    assert float(aux["rotation_deg"]) == 0.0           # ... so nothing is rotated
+    assert float(aux["token_sep_deg"]) == 0.0          # ... and the objects coincide
+    assert float(aux["base_norm"]) > 0.0               # but the base is real
     assert float(aux["text_norm"]) > 0.0
+    assert float(aux["alpha"]) == 1.0
 
     def loss_fn(mm):
         l, a = mm.compute_loss_with_aux(jax.random.key(1), obs, act, gripper_dims=(12, 13))
@@ -619,18 +626,77 @@ def test_graphdef_is_stable_across_constructions():
     )
 
 
-def test_relation_target_norm_is_a_static_float():
-    """The encoder scale must come from config, never from the live param tree.
+def _wake_encoder(enc, seed=1, scale=0.1):
+    """Push the zero-initialized out-projection off zero so the delta is nonzero."""
+    import flax.nnx as nnx  # noqa: F401  (kernel is an nnx.Param)
 
-    Reading it in __init__ was wrong three ways: it runs under jax.eval_shape
-    (tracers, float() raises), it runs before the weight loader (so the table is
-    random init, not pi05_base), and it must include gemma.Embedder.encode's
-    sqrt(embed_dim). Pin the arithmetic: a unit-RMS encoder output leaves with
-    exactly `relation_target_norm` L2.
+    shape = enc.mlp.out.kernel.value.shape
+    enc.mlp.out.kernel.value = jax.random.normal(jax.random.key(seed), shape) * scale
+    return enc
+
+
+def test_injection_is_sized_relative_to_the_base():
+    """||delta|| == alpha * ||base||, for whatever base it is handed.
+
+    THE regression test for relation_v1. Safeguard 2 used to be an ABSOLUTE
+    target measured offline from the checkpoint; it came back 1.63 against a
+    sentinel embedding of 487.76, so the injection rotated the token 0.2 deg and
+    the three objects reached attention at cosine 0.99999 -- indistinguishable.
+    Training could not correct it either: growing a scale 284x is a multiplicative
+    fix driven by additive SGD steps whose gradient is tiny precisely because the
+    injection is tiny (the checkpoint's per-channel mean moved 0.6% in 10k steps).
+    Sizing relative to the live base makes the whole class of error impossible.
     """
-    model = _cfg(relation_target_norm=34.77).create(jax.random.key(0))
-    scale = np.asarray(model.relation_encoder.scale.value)
-    np.testing.assert_allclose(np.linalg.norm(scale), 34.77, rtol=1e-5)
+    enc = _wake_encoder(_cfg(relation_alpha=0.5).create(jax.random.key(0)).relation_encoder)
+    rel = jax.random.normal(jax.random.key(2), (2, 3, 18))
+    for base_norm in (1.0, 34.77, 487.76):
+        got = np.linalg.norm(np.asarray(enc(rel, base_norm)), axis=-1)
+        np.testing.assert_allclose(got, 0.5 * base_norm, rtol=1e-4)
+
+
+def test_zero_init_survives_relative_scaling():
+    """Safeguard 3: the delta is EXACTLY zero at step 0, for any base norm.
+
+    The relative scaling multiplies by alpha*base/sqrt(width), so a large base
+    must not turn the zero-init into a nonzero perturbation.
+    """
+    enc = _cfg().create(jax.random.key(0)).relation_encoder
+    rel = jax.random.normal(jax.random.key(1), (2, 3, 18))
+    np.testing.assert_array_equal(np.asarray(enc(rel, 487.76)), 0.0)
+
+
+def test_embed_prefix_rotates_the_sentinel_by_arctan_alpha():
+    """End-to-end: the injected token is rotated arctan(alpha) off the base.
+
+    Rotation is the whole effect -- gemma.RMSNorm discards per-token magnitude
+    and keeps only direction -- so this is the quantity the canary logs, and the
+    one that read 0.2 deg for all of relation_v1.
+    """
+    alpha = 1.0
+    cfg = _cfg(relation_alpha=alpha)
+    model = cfg.create(jax.random.key(0))
+    _wake_encoder(model.relation_encoder)
+    obs = _obs_with_sentinels(cfg)
+    obs = dataclasses.replace(obs, relations=jnp.asarray(
+        jax.random.normal(jax.random.key(3), (obs.state.shape[0], 3, 18))))
+
+    with_inj, _, _ = model.embed_prefix(obs)
+    base, _, _ = model.embed_prefix(dataclasses.replace(obs, relations=None))
+
+    slot = np.asarray(obs.tokenized_prompt == cfg.relation_sentinel_id)
+    length = obs.tokenized_prompt.shape[1]
+    b, t = np.nonzero(slot)
+    a = np.asarray(base[:, -length:, :])[b, t]
+    c = np.asarray(with_inj[:, -length:, :])[b, t]
+    cos = np.sum(a * c, -1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(c, axis=-1))
+    np.testing.assert_allclose(
+        np.degrees(np.arccos(np.clip(cos, -1, 1))).mean(), np.degrees(np.arctan(alpha)), rtol=0.02
+    )
+    # and non-sentinel positions must be untouched
+    keep = ~slot
+    np.testing.assert_array_equal(
+        np.asarray(with_inj[:, -length:, :])[keep], np.asarray(base[:, -length:, :])[keep]
+    )
 
 
 def test_legacy_config_hash_is_pinned():

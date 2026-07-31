@@ -96,10 +96,15 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
             f"checkpoint? top-level keys: {sorted(params)}"
         )
     print(f"relation_encoder subtree: {sorted(enc)}   mlp: {sorted(enc['mlp'])}")
-    scale = _arr(enc["scale"])
     table = _arr(_find(params, "input_embedding"))
     width = table.shape[-1]
-    print(f"scale {scale.shape}, embedding table {table.shape}")
+    # Two encoder generations: `alpha` (relative sizing, current) and `scale`
+    # (absolute per-channel target, what relation_v1 shipped and got wrong).
+    relative = "alpha" in enc
+    alpha = float(_arr(enc["alpha"])) if relative else None
+    scale = None if relative else _arr(enc["scale"])
+    print(f"encoder generation: {'RELATIVE (alpha)' if relative else 'ABSOLUTE (scale) -- pre-fix'}")
+    print(f"embedding table {table.shape}")
     print()
 
     # ---- 2. the base the delta is added to -------------------------------
@@ -129,23 +134,24 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
     # ---- the encoder's configured magnitude ------------------------------
     print()
     print("=" * 78)
-    print("ENCODER SCALE (the trained value of RelationEncoder.scale)")
+    print("ENCODER MAGNITUDE")
     print("=" * 78)
-    print(f"  ||scale||                   : {np.linalg.norm(scale):10.4f}")
-    print(f"  per-channel mean / std      : {scale.mean():10.6f} / {scale.std():.6f}")
-    print(f"  min / max                   : {scale.min():10.6f} / {scale.max():.6f}")
-    print(f"  relative spread (std/|mean|): {scale.std() / max(abs(scale.mean()), 1e-12):10.4f}")
-    print()
-    print("  scale is initialized PERFECTLY UNIFORM at relation_target_norm/sqrt(width),")
-    print("  so the relative spread dates the parameter: ~0 means it barely moved and")
-    print("  ||scale|| still equals the value it was INITIALIZED with (i.e. the measurement")
-    print("  was wrong); a large spread means training reshaped it and the init is not")
-    print(f"  recoverable from here. Uniform init would give mean = ||scale||/sqrt(width) "
-          f"= {np.linalg.norm(scale) / np.sqrt(len(scale)):.6f}.")
-    print("  RMSNorm pins ||output|| to this, so it IS the plateau in relation/injected_norm.")
-    print("  Compare against what paligemma_embedding_norm returns now: if that says ~259")
-    print("  and this says ~1.7, training shrank a correct init; if both say ~1.7, the")
-    print("  measurement was wrong and safeguard 2 never engaged.")
+    if relative:
+        print(f"  alpha (learned scalar)      : {alpha:10.6f}")
+        print(f"  => ||delta|| should be      : {alpha * np.linalg.norm(base):10.4f}"
+              f"   (alpha x ||embed(<unused0>)||)")
+        print(f"  => rotation should be       : {np.degrees(np.arctan(alpha)):10.4f} deg")
+        print("  Sized relative to the live base, so it cannot be mis-measured; alpha")
+        print("  drifting far from its init means TRAINING chose that, which is real signal.")
+    else:
+        print(f"  ||scale||                   : {np.linalg.norm(scale):10.4f}")
+        print(f"  per-channel mean / std      : {scale.mean():10.6f} / {scale.std():.6f}")
+        print(f"  relative spread (std/|mean|): {scale.std() / max(abs(scale.mean()), 1e-12):10.4f}")
+        print(f"  uniform init would give mean: {np.linalg.norm(scale) / np.sqrt(len(scale)):10.6f}")
+        print()
+        print("  PRE-FIX checkpoint. scale was initialized perfectly uniform at an")
+        print("  offline-measured absolute target, so a near-zero relative spread means")
+        print("  the parameter never moved and ||scale|| is still the (wrong) init.")
 
     # ---- 1. run the encoder on REAL relation vectors ---------------------
     import pandas as pd
@@ -175,7 +181,10 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
 
     x = _geglu(enc["mlp"], z.reshape(-1, z.shape[-1]))
     rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + 1e-6)
-    delta = ((x / rms) * scale).reshape(z.shape[0], n_obj, width)
+    # Mirror whichever generation this checkpoint is: relative alpha x base, or
+    # the old absolute per-channel scale vector.
+    gain = (alpha * np.linalg.norm(base) / np.sqrt(width)) if relative else scale
+    delta = ((x / rms) * gain).reshape(z.shape[0], n_obj, width)
 
     names = ("pen holder", "red cube", "yellow cube")
     print()

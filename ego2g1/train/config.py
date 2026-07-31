@@ -313,11 +313,16 @@ class EgoRelationTrainConfig(_CommonTrainFields):
     control_mode: str = _transforms.CONTROL_MODE_EEF
     relation_hidden: int = 512   # GeGLU hidden width of the relation encoder
     grasp_head: bool = True      # auxiliary per-slot grasp-probability head
-    # Init magnitude of the injected relation token (safeguard 2). None = measure
-    # it from the pretrained checkpoint at startup, which is what you want; set a
-    # float only to pin a run to a value you already measured. Measuring restores
-    # the params once and caches the scalar beside them.
-    relation_target_norm: float | None = None
+    # Safeguard 2: the injected relation token's size as a FRACTION of the
+    # sentinel embedding it is added to, which is read live at injection time.
+    # Dimensionless, so it cannot be silently wrong the way the old absolute
+    # target was (relation_v1 got 1.63 against a base of 487.76).
+    #
+    # 1.0 = parity: the token is rotated arctan(1) = 45 deg and the three object
+    # tokens end up ~47 deg apart. Deliberately not lower: a too-large injection
+    # is easy for training to shrink, a too-small one is a multiplicative
+    # correction it provably cannot make (see RelationEncoder).
+    relation_alpha: float = 1.0
 
     # --- normalization ---
     # "per_slot_quantile": per-(slot, dim) q01/q99 -> [-1, 1] directly, gripper
@@ -423,7 +428,7 @@ class EgoRelationTrainConfig(_CommonTrainFields):
             relation_hidden=self.relation_hidden,
             grasp_head=self.grasp_head,
             state_dim=self.state_dim,
-            relation_target_norm=self.relation_target_norm,
+            relation_alpha=self.relation_alpha,
         )
 
     def weight_loader(self) -> _weight_loaders.WeightLoader:

@@ -71,14 +71,10 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
     # tokenizer download; tests/train/test_relation_transforms.py asserts the
     # tokenizer really maps the sentinel to this id.
     relation_sentinel_id: int = 7
-    # L2 norm the injected relation token is scaled to at init (safeguard 2),
-    # measured from the PRETRAINED embedding table by
-    # relation.paligemma_embedding_norm and set by the train entrypoint. It
-    # cannot be read here: this config is built before the weight loader runs
-    # and the model is constructed under jax.eval_shape. None = 1.0, which is
-    # fine for shape/zero-init tests and wrong for training, so the entrypoint
-    # refuses to train without it.
-    relation_target_norm: float | None = None
+    # Injected token size as a FRACTION of the sentinel embedding it is added to
+    # (safeguard 2). Dimensionless and used directly -- there is no offline
+    # measurement to get wrong, because the base is read live in embed_prefix.
+    relation_alpha: float = 1.0
     # Per-dim loss weights over the D_real action dims, mean 1. None = uniform.
     # A tuple (not an array) so the frozen dataclass stays hashable.
     loss_dim_weights: tuple[float, ...] | None = None
@@ -144,6 +140,20 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
         return flags
 
 
+def _mean_pairwise_angle(v):
+    """Mean angle (degrees) between the n object vectors of `v` (*b, n, emb).
+
+    Reports how DISTINGUISHABLE the objects are. Guards the norm against zero so
+    that step 0 -- where zero-init makes every delta exactly 0 -- yields 0 rather
+    than NaN, which would poison the whole wandb history.
+    """
+    unit = v / jnp.maximum(jnp.linalg.norm(v, axis=-1, keepdims=True), 1e-6)
+    cos = jnp.einsum("...ie,...je->...ij", unit, unit)
+    n = cos.shape[-1]
+    off = ~jnp.eye(n, dtype=bool)
+    return jnp.degrees(jnp.arccos(jnp.clip(jnp.mean(cos, axis=0)[off], -1.0, 1.0))).mean()
+
+
 class Ego2G1Pi0(_pi0.Pi0):
     def __init__(self, config: Ego2G1Pi0Config, rngs: nnx.Rngs):
         super().__init__(config, rngs=rngs)
@@ -164,15 +174,12 @@ class Ego2G1Pi0(_pi0.Pi0):
                 config.relation_hidden,
                 self.PaliGemma.llm.module.configs[0].width,
                 rngs=rngs,
-                # Match a real token's magnitude so the injected embedding starts
-                # life the size of a word (safeguard 2 in relation.py). A STATIC
-                # float, measured from the pretrained checkpoint by the entrypoint:
-                # this constructor runs under jax.eval_shape (tracers, no concrete
-                # values) and before the weight loader (so the live table here is
-                # random init, not pi05_base). 1.0 is a test-only fallback.
-                target_norm=(
-                    1.0 if config.relation_target_norm is None else config.relation_target_norm
-                ),
+                # Size relative to whatever it is injected into, resolved at CALL
+                # time (safeguard 2 in relation.py). No offline measurement, so
+                # this constructor running under jax.eval_shape and before the
+                # weight loader -- which broke both previous attempts -- is now
+                # simply irrelevant.
+                alpha_init=config.relation_alpha,
             )
         if config.grasp_head:
             self.grasp_head = _relation.GraspHead(
@@ -184,6 +191,22 @@ class Ego2G1Pi0(_pi0.Pi0):
             )
 
     # ------------------------------------------------------------------ prefix
+
+    def sentinel_base_norm(self, tokens, obs):
+        """Mean L2 norm of the embeddings sitting at the sentinel slots.
+
+        This is the quantity safeguard 2 sizes the injection against, and reading
+        it from the live token stream -- rather than measuring the embedding table
+        offline -- is what makes a 284x mis-scaling impossible. It is also the
+        RIGHT anchor: relation_v1 targeted the vocabulary mean, but the token
+        actually injected into (`<unused0>`, 487.76) is 34% larger than that mean
+        (364.24) and 88% larger than the in-prompt mean (259.05) the old canary
+        reported. Three different populations, only one of which matters.
+        """
+        length = obs.tokenized_prompt.shape[1]
+        slot = obs.tokenized_prompt == self.relation_sentinel_id
+        norms = jnp.linalg.norm(tokens[:, -length:, :].astype(jnp.float32), axis=-1)
+        return jnp.sum(jnp.where(slot, norms, 0.0)) / jnp.maximum(jnp.sum(slot), 1.0)
 
     @override
     def embed_prefix(self, obs):
@@ -216,9 +239,13 @@ class Ego2G1Pi0(_pi0.Pi0):
 
         length = obs.tokenized_prompt.shape[1]
         text = tokens[:, -length:, :]
-        rel = self.relation_encoder(relations)                       # (b, n, emb)
 
         slot = obs.tokenized_prompt == self.relation_sentinel_id      # (b, l)
+        # Safeguard 2: size the injection RELATIVE to the embedding it lands on,
+        # measured here rather than from an offline reading of the checkpoint.
+        # Every sentinel is the same token so these norms are identical; the mean
+        # is just an honest way to reduce them to the scalar the encoder wants.
+        rel = self.relation_encoder(relations, self.sentinel_base_norm(tokens, obs))
         # The k-th sentinel gets the k-th relation row. cumsum-1 gives that rank;
         # non-slot positions get a meaningless rank but are zeroed out below.
         rank = jnp.cumsum(slot, axis=1) - 1
@@ -310,10 +337,35 @@ class Ego2G1Pi0(_pi0.Pi0):
             slot = observation.tokenized_prompt == self.relation_sentinel_id
             real = observation.tokenized_prompt_mask & ~slot
             text_norms = jnp.linalg.norm(prefix_tokens[:, -length:, :].astype(jnp.float32), axis=-1)
-            aux["injected_norm"] = jnp.mean(
-                jnp.linalg.norm(self.relation_encoder(observation.relations).astype(jnp.float32), axis=-1)
-            )
+
+            base_norm = self.sentinel_base_norm(prefix_tokens, observation)
+            delta = self.relation_encoder(observation.relations, base_norm).astype(jnp.float32)
+            delta_norm = jnp.linalg.norm(delta, axis=-1)               # (b, n)
+
+            aux["base_norm"] = base_norm
+            aux["delta_norm"] = jnp.mean(delta_norm)
+            aux["alpha"] = self.relation_encoder.alpha.value
+            # Kept for continuity with earlier runs, but note it is the mean over
+            # OTHER text tokens -- not the token being injected into, which is why
+            # relation_v1's norm_ratio under-reported the damage by ~2x.
             aux["text_norm"] = jnp.sum(jnp.where(real, text_norms, 0.0)) / jnp.maximum(jnp.sum(real), 1.0)
+
+            # THE canary. gemma.RMSNorm discards magnitude and keeps direction, so
+            # the injection's only effect is to rotate the token it is added to.
+            # arctan(alpha) is the healthy value; relation_v1 sat at 0.2 deg.
+            aux["rotation_deg"] = jnp.degrees(jnp.arctan(jnp.mean(delta_norm) / jnp.maximum(base_norm, 1e-6)))
+
+            # End-to-end: how far apart are the object tokens attention actually
+            # receives? This is what 0.2 deg of rotation destroyed -- the encoder
+            # separated the objects by 60-76 deg and the sum collapsed them to 0.2.
+            # Splitting the two makes the failure legible: delta_sep stays healthy
+            # while token_sep goes to zero iff the injection is too small.
+            injected = prefix_tokens[:, -length:, :].astype(jnp.float32)
+            base_vec = jnp.sum(jnp.where(slot[..., None], injected, 0.0), axis=1) / jnp.maximum(
+                jnp.sum(slot, axis=1, keepdims=True), 1.0
+            )                                                          # (b, emb) mean sentinel token
+            aux["delta_sep_deg"] = _mean_pairwise_angle(delta)
+            aux["token_sep_deg"] = _mean_pairwise_angle(base_vec[:, None, :] + delta)
         return chunked_loss, aux
 
     @at.typecheck
