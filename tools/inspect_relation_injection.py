@@ -23,6 +23,21 @@ import pathlib
 import numpy as np
 
 
+def _cos(a, b):
+    """Row-wise cosine between (N, D) arrays.
+
+    NOTE the `axis=-1`: np.linalg.norm's second POSITIONAL arg is `ord`, not
+    `axis`, so np.linalg.norm(a, -1) silently computes a matrix norm (the min
+    absolute column sum) and the result is not a cosine at all. The assertion
+    below is there because that mistake produces plausible-looking numbers.
+    """
+    cos = np.sum(a * b, axis=-1) / (
+        np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1)
+    )
+    assert np.all(np.abs(cos) <= 1.0 + 1e-6), f"not a cosine: max |cos| = {np.abs(cos).max()}"
+    return cos
+
+
 def _arr(x):
     """Unwrap a leaf. nnx state serializes params as {'value': array} (visible in
     the sharding logs as ...['kernel'].value), while a plain released checkpoint
@@ -156,9 +171,9 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
     print("  Does the encoder DISTINGUISH objects? cosine between delta directions:")
     for i in range(n_obj):
         for j in range(i + 1, n_obj):
-            a, b = delta[:, i], delta[:, j]
-            cos = np.sum(a * b, -1) / (np.linalg.norm(a, -1) * np.linalg.norm(b, -1))
-            print(f"    {names[i]:12s} vs {names[j]:12s}: cos = {cos.mean():+.6f}")
+            cos = _cos(delta[:, i], delta[:, j])
+            print(f"    {names[i]:12s} vs {names[j]:12s}: cos = {cos.mean():+.6f}"
+                  f"   (angle {np.degrees(np.arccos(np.clip(cos.mean(), -1, 1))):6.2f} deg)")
     print("  cos near +1 = the encoder maps every object to the same direction (collapsed).")
 
     # ---- 3. the actual injected tokens -----------------------------------
@@ -174,8 +189,7 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
     print("  pairwise cosine between the three FINAL token embeddings:")
     for i in range(n_obj):
         for j in range(i + 1, n_obj):
-            a, b = injected[:, i], injected[:, j]
-            cos = np.sum(a * b, -1) / (np.linalg.norm(a, -1) * np.linalg.norm(b, -1))
+            cos = _cos(injected[:, i], injected[:, j])
             print(f"    {names[i]:12s} vs {names[j]:12s}: cos = {cos.mean():.8f}"
                   f"   (angle {np.degrees(np.arccos(np.clip(cos.mean(), -1, 1))):.4f} deg)")
     print()
