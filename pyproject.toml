@@ -52,6 +52,7 @@ deploy = [
     "pyarrow",  # replay_dataset reads LeRobot parquet directly
     "tyro",
     "openpi-client",
+    "pyyaml",   # deploy/perception/task_config.py's operator-facing task YAML
 ]
 teleop = [
     # televuer is vendored from xr_teleoperate/teleop/televuer (212 KB — the
