@@ -175,19 +175,44 @@ class RelationPolicyAdapter:
           `actions.RelativeEEFRotvecChunks` (OneEuroSE3 -> DualArmIK
           posture-tracks-last @ 0.05 -> JointFilter) -> (H, 26).
 
-    THIS ADAPTER DOES NOT COMPUTE THE RELATION STATE. Live perception
-    (object detection + depth + hand-relative geometry,
-    docs/relation_deploy_plan.md §5, "Phase 2") is not built yet. Until it
-    is, this is a thin pass-through: the caller must place the already-
-    computed (56,) float32 array at `request["relation_state"]` before
-    calling `.infer(...)` — a stand-in for what the future
-    `RelationPerception.observe(...)` module will produce
-    (`percept["state"]` in that module's contract). Whoever builds Phase 2:
-    match this exact layout (hand-major, unshuffled object order, grasp
-    binaries at the tail, vec9 = [tx,ty,tz, R[:,0], R[:,1]] per
-    `ego2g1.core.rot6d`) — a mismatched layout silently mispairs an object
-    name with the wrong geometry and trains/serves a plausible-looking but
-    wrong policy.
+    Two ways to supply the relation state, chosen by whether `perception`
+    (a `ego2g1.deploy.perception.relation_perception.RelationPerception`)
+    is passed to the constructor:
+
+      perception=None (default)   Thin pass-through: the caller must place
+                                   an already-computed (56,) float32 array at
+                                   `request["relation_state"]`. This is what
+                                   every existing test in this codebase uses
+                                   (docs/relation_deploy_plan.md's Phase-1
+                                   validation, before Phase 2's live
+                                   perception existed) and remains supported
+                                   — a mocked/replayed relation state is
+                                   still the right tool for testing the
+                                   action-conversion path in isolation from
+                                   the (much more failure-prone) camera/
+                                   detector stack.
+      perception=<instance>       `infer()` calls `perception.observe(
+                                   request["rgb_left"], request["rgb_right"],
+                                   flange_poses, request["hand_cmds_last"])`
+                                   itself — `flange_poses` comes from this
+                                   adapter's own `Kinematics` (the SAME
+                                   instance the action converter uses, so the
+                                   relation state's hand-frame and the
+                                   action's anchor are the identical FK
+                                   call, never two independently-computed
+                                   flange poses that could drift apart).
+                                   `request["hand_cmds_last"]`: {hand: float
+                                   in [0, 1]}, the last-commanded gripper
+                                   FRACTION (not the old modes' (6,) motor
+                                   vector) — see `RelativeEEFRotvecChunks`'s
+                                   own `frac` convention.
+
+    Either way, the resulting layout must match EXACTLY: hand-major,
+    unshuffled object order (matching the connected checkpoint's
+    `train_config.objects`), grasp binaries at the tail, vec9 =
+    [tx,ty,tz, R[:,0], R[:,1]] per `ego2g1.core.rot6d` — a mismatched layout
+    silently mispairs an object name with the wrong geometry and serves a
+    plausible-looking but wrong policy.
 
     RTC is NOT supported for this mode (`EgoRelationTrainConfig
     .rtc_training = False`; the reanchor-prefix math for rotvec deltas +
@@ -204,7 +229,7 @@ class RelationPolicyAdapter:
 
     def __init__(self, client, prompt: str = "", *, converter=None, kin=None,
                  ik_iters: int = 25, posture_cost: float = 0.05,
-                 collision_min_dist: float = 0.005):
+                 collision_min_dist: float = 0.005, perception=None):
         self._client = client
         self.prompt = prompt
         self.action_horizon = int(client.action_horizon)
@@ -213,6 +238,11 @@ class RelationPolicyAdapter:
             kin, fps=self.fps, ik_iters=ik_iters, posture_cost=posture_cost,
             collision_min_dist=collision_min_dist)
         self._kin = self._converter.kin
+        # ego2g1.deploy.perception.relation_perception.RelationPerception, or
+        # None for the pass-through contract (see class docstring). Optional
+        # so every existing test that supplies `request["relation_state"]`
+        # directly keeps working unchanged.
+        self._perception = perception
 
     @property
     def last_tracking_error(self) -> float:
@@ -221,7 +251,15 @@ class RelationPolicyAdapter:
     def infer(self, request: dict) -> dict:
         arm_q = np.asarray(request["arm_q"], dtype=np.float64)
         hand_cmds = request["hand_cmds"]
-        state = np.asarray(request["relation_state"], dtype=np.float32)
+        if self._perception is not None:
+            flange_poses = self._kin.flange_poses(arm_q)
+            percept = self._perception.observe(
+                request["rgb_left"], request["rgb_right"],
+                flange_poses, request["hand_cmds_last"])
+            state = np.asarray(percept["state"], dtype=np.float32)
+            self.last_percept = percept
+        else:
+            state = np.asarray(request["relation_state"], dtype=np.float32)
         if state.shape != (relation_layout.RELATION_STATE_DIM,):
             raise ValueError(
                 f"relation_state: expected ({relation_layout.RELATION_STATE_DIM},), "

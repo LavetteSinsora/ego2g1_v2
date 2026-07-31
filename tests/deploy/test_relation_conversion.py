@@ -231,6 +231,61 @@ def test_relation_policy_adapter_rejects_rtc(kin_smooth):
                        "enable_rtc": True, "prev_action_chunk": np.zeros((2, 26))})
 
 
+def test_relation_policy_adapter_with_perception_computes_state_itself(kin_smooth):
+    """`perception=` wires ego2g1.deploy.perception.relation_perception
+    .RelationPerception into the adapter (docs/relation_deploy_plan.md §5.5,
+    §9 task 10): infer() no longer needs `request["relation_state"]` -- it
+    calls `perception.observe(rgb_left, rgb_right, flange_poses,
+    hand_cmds_last)` itself, using this adapter's OWN Kinematics for
+    `flange_poses` (same FK call the action converter anchors onto)."""
+    from ego2g1.deploy.perception.depth import StereoCalibration
+    from ego2g1.deploy.perception.detector import FakeDetector, Detection
+    from ego2g1.deploy.perception.relation_perception import RelationPerception
+    from ego2g1.deploy.perception.task_config import DeployTaskConfig, ObjectSpec
+    from ego2g1.deploy.policy_adapter import RelationPolicyAdapter
+
+    task_config = DeployTaskConfig(objects=(
+        ObjectSpec("obj0", "pen holder", "a pen holder .", graspable=False),
+        ObjectSpec("obj1", "red cube", "a red cube .", graspable=True),
+        ObjectSpec("obj2", "yellow cube", "a yellow cube .", graspable=True),
+    ))
+    detector = FakeDetector()
+    for obj in task_config.objects:
+        detector.set_detection(obj.instance_id, Detection(
+            instance_id=obj.instance_id, confidence=0.9,
+            box_xyxy=np.array([30.0, 30.0, 34.0, 34.0])))
+
+    class _StaticDepth:
+        def estimate(self, rgb_left, rgb_right):
+            return np.full((64, 64), 1.0, dtype=np.float32)
+
+    calib = StereoCalibration(
+        K_left=np.array([[50.0, 0, 32.0], [0, 50.0, 32.0], [0, 0, 1]]),
+        K_right=np.eye(3), dist_left=np.zeros(5), dist_right=np.zeros(5),
+        R=np.eye(3), T=np.array([0.06, 0.0, 0.0]), image_size=(64, 64))
+    perception = RelationPerception(
+        task_config, detector, _StaticDepth(), calib, T_pelvis_camera=np.eye(4), fps=FPS)
+
+    client = _FakeRelationClient()
+    adapter = RelationPolicyAdapter(client, "task", kin=kin_smooth, perception=perception)
+    q0 = _nominal_q0()
+    hand_cmds = {h: np.zeros(6) for h in layout.HANDS}
+    rgb = np.zeros((64, 64, 3), dtype=np.uint8)
+
+    out = adapter.infer({
+        "arm_q": q0, "hand_cmds": hand_cmds, "image": None, "prompt": "task",
+        "rgb_left": rgb, "rgb_right": rgb,
+        "hand_cmds_last": {"left": 0.0, "right": 0.0},
+    })
+
+    assert out["actions"].shape == (client.action_horizon, 26)
+    assert client.last_call["state"].shape == (relation_layout.RELATION_STATE_DIM,)
+    # no relation_state was ever supplied in the request -- it MUST have come
+    # from perception.observe(), and last_percept must reflect that call
+    assert adapter.last_percept["state"].shape == (relation_layout.RELATION_STATE_DIM,)
+    np.testing.assert_array_equal(adapter.last_percept["state"], client.last_call["state"])
+
+
 # --------------------------------------------------------------------------
 # real-dataset ground truth
 # --------------------------------------------------------------------------
