@@ -3,6 +3,7 @@
 #   uv sync --group train        -> + jax/openpi training stack
 #   uv sync --group deploy       -> + DDS/unitree_deploy robot stack
 #   uv sync --group teleop       -> + vuer WebXR teleop
+#   uv sync --group perception   -> + deploy + GroundingDINO/SAM2 live detection
 # Machine-specific overlays (PPU box borrowed venv, robot PC) are NOT uv-managed;
 # they are documented profiles in envs/ — see docs/environments.md for why.
 [project]
@@ -58,6 +59,29 @@ teleop = [
     # televuer is vendored from xr_teleoperate/teleop/televuer (212 KB — the
     # only part of that repo we actually depend on); it brings vuer at its pin
     "televuer",
+]
+# Only needed for the live GroundingDINO+SAM2 object-detector stage of
+# ego2g1/deploy/perception/detector.py (docs/relation_deploy_plan.md §5.3),
+# not for the tracker/orientation math around it (those are plain
+# numpy/opencv and already covered by `deploy`, which this group includes
+# via PEP 735 `include-group` so a real relation_eef rollout is one
+# `uv sync --group perception`, not two groups synced side by side). Package
+# choices and version ranges mirror data_extraction_zh/pyproject.toml's own
+# `perception` group for the same libraries — its `third_party/
+# humanego_runtime/preprocess/DINOSAM.py::DINOSAMEngine` is the exact call
+# shape `GroundingDinoSam2Detector` is modeled on — EXCEPT torch/torchvision
+# are left UNPINNED here (that project pins `torch==2.5.1` against a cu121
+# index): `deploy` already depends on a bare, unpinned `torch`, and this
+# group deliberately does not add a second, conflicting pin on top of it. Do
+# not add a torch/torchvision version pin or a pytorch-cu121 index here
+# without checking it against `deploy`'s requirement first.
+perception = [
+    {include-group = "deploy"},
+    "transformers>=4.40,<5",   # GroundingDINO via AutoModelForZeroShotObjectDetection
+    "sam2>=1.0",
+    "huggingface-hub>=0.23",
+    "accelerate>=0.25",
+    "safetensors>=0.4",
 ]
 dev = ["pytest"]
 
