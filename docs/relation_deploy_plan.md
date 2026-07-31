@@ -356,6 +356,16 @@ interface (`estimate(rgb_left, rgb_right) -> depth_map`) so a future
 hardware change is still a swap, not a rewrite, but do not build a second
 implementation speculatively.
 
+**Directly hardware-confirmed (2026-07-31, `lsusb` on the physical robot
+board)**: no Intel-vendor-ID (8086) device is present on either USB bus —
+every RealSense camera enumerates under that vendor ID, so this settles it
+independent of any config file or spec sheet. The camera almost certainly
+enumerates via `Bus 001 Device 003: ID 1bcf:2d4f Sunplus Innovation
+Technology Inc.` — a UVC controller chip common in generic stereo webcam
+modules, consistent with everything above. This upgrades the depth-source
+decision from "researched, not directly verified" to hardware-confirmed;
+no further investigation needed unless the physical camera module changes.
+
 **New prerequisite this surfaces**: there is no stereo calibration data
 (K matrix, baseline, rectification maps) anywhere in either repo for this
 camera — the "60 mm baseline" is a datasheet nominal, not a per-unit
