@@ -141,17 +141,25 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
 
 
 def _mean_pairwise_angle(v):
-    """Mean angle (degrees) between the n object vectors of `v` (*b, n, emb).
+    """Mean angle (degrees) between the n object vectors of `v` (b, n, emb).
 
-    Reports how DISTINGUISHABLE the objects are. Guards the norm against zero so
-    that step 0 -- where zero-init makes every delta exactly 0 -- yields 0 rather
-    than NaN, which would poison the whole wandb history.
+    Reports how DISTINGUISHABLE the objects are.
+
+    Off-diagonal terms are selected with a multiplicative float mask, NOT boolean
+    indexing: `cos[off]` has a data-dependent output shape, which is fine eagerly
+    and raises NonConcreteBooleanIndexError inside jit -- and the train step is
+    jitted. Everything here has to be shape-static.
     """
-    unit = v / jnp.maximum(jnp.linalg.norm(v, axis=-1, keepdims=True), 1e-6)
-    cos = jnp.einsum("...ie,...je->...ij", unit, unit)
-    n = cos.shape[-1]
-    off = ~jnp.eye(n, dtype=bool)
-    return jnp.degrees(jnp.arccos(jnp.clip(jnp.mean(cos, axis=0)[off], -1.0, 1.0))).mean()
+    norms = jnp.linalg.norm(v, axis=-1, keepdims=True)
+    unit = v / jnp.maximum(norms, 1e-6)
+    cos = jnp.mean(jnp.einsum("bie,bje->bij", unit, unit), axis=0)      # (n, n)
+    ang = jnp.degrees(jnp.arccos(jnp.clip(cos, -1.0, 1.0)))
+    off = 1.0 - jnp.eye(ang.shape[-1], dtype=ang.dtype)
+    mean_ang = jnp.sum(ang * off) / jnp.maximum(jnp.sum(off), 1.0)
+    # At step 0 zero-init makes every delta exactly 0, so `unit` is 0, the cosine
+    # is 0, and arccos would report a meaningless 90 deg. Report 0: nothing was
+    # injected, so nothing is separated.
+    return jnp.where(jnp.min(norms) > 1e-6, mean_ang, 0.0)
 
 
 class Ego2G1Pi0(_pi0.Pi0):

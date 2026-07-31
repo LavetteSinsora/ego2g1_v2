@@ -70,6 +70,54 @@ def test_train_step_and_eval_step():
     assert float(val_info["val/loss"]) == float(val_info2["val/loss"])
 
 
+def test_relation_train_step_under_jit():
+    """The RELATIONAL train step must survive jax.jit, not just eager execution.
+
+    The real loop runs this jitted, and jit rejects things eager execution
+    accepts. `_mean_pairwise_angle` originally selected off-diagonal terms with
+    boolean indexing (`cos[off]`), whose output shape is data-dependent: fine
+    eagerly, NonConcreteBooleanIndexError under jit. Every relational test called
+    compute_loss_with_aux directly, so the whole suite passed and the failure
+    landed 3 minutes into a run on the training box instead.
+    """
+    import dataclasses
+
+    from ego2g1.train import config as _config
+
+    model_cfg = ego_model.Ego2G1Pi0Config(
+        **{**_KW, "action_dim": 16}, action_dim_actual=14, n_objects=3,
+        relation_dim=18, relation_hidden=16, grasp_head=True, state_dim=54,
+    )
+    tc = _openpi_config.TrainConfig(name="t", exp_name="t", model=model_cfg, batch_size=2)
+    ego_cfg = _config.EgoRelationTrainConfig()
+    state = _make_state(tc)
+
+    obs = model_cfg.fake_obs(2)
+    tp = np.asarray(obs.tokenized_prompt).copy()
+    for i, s in enumerate((3, 6, 9)):
+        tp[:, s] = model_cfg.relation_sentinel_id
+    obs = dataclasses.replace(
+        obs,
+        tokenized_prompt=jnp.asarray(tp),
+        relations=jnp.asarray(jax.random.normal(jax.random.key(7), (2, 3, 18))),
+    )
+    batch = (obs, model_cfg.fake_act(2))
+
+    step = jax.jit(lambda r, s, b: ego_train.relation_train_step(tc, ego_cfg, r, s, b))
+    new_state, info = step(jax.random.key(1), state, batch)
+
+    assert int(new_state.step) == 1
+    for k in ("relation/rotation_deg", "relation/token_sep_deg", "relation/delta_sep_deg",
+              "relation/alpha", "relation/base_norm", "relation/delta_norm"):
+        assert k in info, sorted(info)
+        assert np.isfinite(float(info[k])), k
+    # zero-init: nothing injected, so nothing rotated and nothing separated
+    assert float(info["relation/delta_norm"]) == 0.0
+    assert float(info["relation/rotation_deg"]) == 0.0
+    assert float(info["relation/delta_sep_deg"]) == 0.0   # NOT the arccos(0)=90 trap
+    assert float(info["relation/base_norm"]) > 0.0
+
+
 def test_attention_allocation_shapes_and_normalization():
     cfg = ego_model.Ego2G1Pi0Config(**_KW)
     m = cfg.create(jax.random.key(0))
