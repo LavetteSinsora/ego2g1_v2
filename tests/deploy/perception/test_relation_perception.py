@@ -216,7 +216,17 @@ class TestLatchIntegration:
         )
         target = cfg.objects[1].instance_id  # graspable
         for obj in cfg.objects:
-            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+            # Every OTHER object is seeded far from the hand's location (a
+            # distinct pixel AND, via _StaticDepth's uniform depth map, the
+            # same depth but a different projected 3D point) so there is no
+            # tie with `target` for "nearest to the hand" -- seeding every
+            # object at the identical (CX, CY) pixel here previously made
+            # obj1/obj2 exact-distance ties, and which one "won" then
+            # depended on Python's per-process set-iteration order
+            # (`eligible_objects` in latch.py is a set) -- a real, flaky bug
+            # in this test, not in GraspLatch's own nearest-object logic.
+            u = CX if obj.instance_id == target else CX + 20.0
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, u, CY))
 
         flange = {"left": np.eye(4)}
         # Seed all trackers first (hand open, nothing near yet).
