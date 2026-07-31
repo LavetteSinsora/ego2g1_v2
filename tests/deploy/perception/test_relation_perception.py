@@ -160,6 +160,49 @@ class TestObserveBasics:
         assert np.all(np.isfinite(out["state"]))
 
 
+class TestDetectorCadence:
+    """§5.3's tiered cascade: the (expensive, real-GPU) detector must run at
+    a throttled cadence, not every tick -- a real GroundingDINO+SAM2 call
+    takes real time, unlike FakeDetector's instant return. Between detector
+    ticks, every object must still track (via ObjectTracker.predict), not
+    freeze or raise."""
+
+    def test_detector_called_only_every_period_ticks(self):
+        perception, detector = _perception(detector_period_ticks=3)
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        hand_cmds = {"left": 0.0, "right": 0.0}
+
+        for _ in range(9):
+            perception.observe(_rgb(), _rgb(), flange, hand_cmds)
+
+        # ticks 0, 3, 6 -> 3 detector calls out of 9 observe() calls
+        assert len(detector.calls) == 3
+
+    def test_objects_still_tracked_between_detector_ticks(self):
+        perception, detector = _perception(detector_period_ticks=4)
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        hand_cmds = {"left": 0.0, "right": 0.0}
+
+        perception.observe(_rgb(), _rgb(), flange, hand_cmds)  # tick 0: seeds all trackers
+        for tick in range(1, 4):  # ticks 1-3: no detector call, must still track
+            out = perception.observe(_rgb(), _rgb(), flange, hand_cmds)
+            for obj in perception.task_config.objects:
+                assert out["objects"][obj.instance_id].detected_this_tick is False
+                assert out["objects"][obj.instance_id].tracked is True
+                assert out["objects"][obj.instance_id].pose_pelvis is not None
+            assert np.all(np.isfinite(out["state"]))
+        # the detector was queried once (tick 0) in 4 observe() calls
+        assert len(detector.calls) == 1
+
+    def test_default_detector_period_is_roughly_2hz_at_30fps(self):
+        perception, _ = _perception()
+        assert perception._detector_period == 15  # round(30 / 2)
+
+
 class TestLatchIntegration:
     def test_hand_closing_on_a_consistently_moving_object_reaches_latched(self):
         """Full end-to-end grasp confirmation: hand closes near an object whose

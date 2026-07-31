@@ -13,10 +13,17 @@ Per-tick pipeline, per object (in `task_config.objects` order -- the SAME
 fixed order the connected checkpoint's `train_config.objects` uses, already
 enforced once at connect time via `task_config.validate_against_server_metadata`):
 
-  1. `detector.detect(rgb_left, task_config.objects)` -- `ObjectSpec` duck-types
-     `detector.ObjectQuery` (both are plain `instance_id`/`detector_prompt`
-     attributes), so `task_config.objects` is passed straight through, no
-     adapter class needed.
+  1. `detector.detect(rgb_left, task_config.objects)` AND `depth_source
+     .estimate(...)` -- but only every `detector_period_ticks` ticks
+     (default ~2 Hz, per §5.3's tiered cascade), NOT every tick. Both calls
+     are genuinely expensive on real hardware (GroundingDINO+SAM2 on a GPU,
+     StereoSGBM on the CPU) -- on the ticks in between, neither is called
+     at all, and every object falls through to step 3's "not detected this
+     tick" branch, which is exactly the fast (~20-30 Hz) tracker tier: no
+     separate code path needed, just skipping these two calls. `ObjectSpec`
+     duck-types `detector.ObjectQuery` (both are plain `instance_id`/
+     `detector_prompt` attributes), so `task_config.objects` is passed
+     straight through, no adapter class needed.
   2. A found detection's pixel centroid (mask-median if a mask is present,
      else box center) is looked up in `depth_source.estimate(...)`'s depth
      map and back-projected to a camera-frame 3D point via the calibration's
@@ -149,6 +156,7 @@ class RelationPerception:
         T_pelvis_camera: np.ndarray,
         *,
         fps: int = 30,
+        detector_period_ticks: int | None = None,  # None -> round(fps / 2), ~2 Hz (§5.3)
         orientation_period_ticks: int = 6,  # ~0.2 Hz at fps=30 (§5.3's cadence)
         orientation_estimator: OrientationEstimator | None = None,
         nominal_rotations: dict[str, np.ndarray] | None = None,
@@ -162,6 +170,17 @@ class RelationPerception:
         self.calib = calib
         self.T_pelvis_camera = np.asarray(T_pelvis_camera, dtype=np.float64)
         self.dt = 1.0 / float(fps)
+        # The detector (GroundingDINO+SAM2 on real hardware) and the depth
+        # estimate that feeds a NEW detection's 3D lift are both genuinely
+        # expensive -- unlike a FakeDetector/synthetic depth map in tests,
+        # a real GPU call takes real time, and §5.3's whole point is that
+        # this stage runs at ~2 Hz while the tracker (predict/extrapolate,
+        # cheap) carries every tick in between. Gating BOTH calls behind the
+        # same cadence (not just orientation) is the fix for an oversight in
+        # the first version of this class, which called the detector every
+        # tick -- fine with a FakeDetector, would have blown the timing
+        # budget badly against real weights.
+        self._detector_period = max(1, int(detector_period_ticks or round(fps / 2.0)))
         self._orientation_period = max(1, int(orientation_period_ticks))
         self._orientation_estimator = orientation_estimator
         self._nominal_rotations = nominal_rotations or {}
@@ -216,8 +235,20 @@ class RelationPerception:
         Returns {"state": (56,) float32, "objects": {instance_id:
         ObjectDebug}, "latch": {hand: LatchResult}}.
         """
-        depth_map = self.depth_source.estimate(rgb_left, rgb_right)
-        detections = self.detector.detect(rgb_left, self.task_config.objects)
+        run_detector_this_tick = self._tick % self._detector_period == 0
+        if run_detector_this_tick:
+            depth_map = self.depth_source.estimate(rgb_left, rgb_right)
+            detections = self.detector.detect(rgb_left, self.task_config.objects)
+        else:
+            # Between detector refreshes: no new 2D/depth measurement at
+            # all, for ANY object -- every object falls through to the
+            # existing "not detected this tick" branch below, which already
+            # means "let the tracker predict/extrapolate". This IS the fast
+            # (~20-30 Hz) tracker tier the plan describes; it needs no
+            # separate code path, only that the detector/depth calls above
+            # are skipped.
+            depth_map = None
+            detections = {}
 
         object_debug: dict[str, ObjectDebug] = {}
         tracked_poses_pelvis: dict[str, np.ndarray | None] = {}
