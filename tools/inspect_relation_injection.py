@@ -23,10 +23,24 @@ import pathlib
 import numpy as np
 
 
+def _arr(x):
+    """Unwrap a leaf. nnx state serializes params as {'value': array} (visible in
+    the sharding logs as ...['kernel'].value), while a plain released checkpoint
+    stores the array directly. Accept both."""
+    if isinstance(x, dict) and "value" in x:
+        x = x["value"]
+    return np.asarray(x, dtype=np.float64)
+
+
 def _find(tree, key):
-    """DFS for a named leaf; same lookup relation.paligemma_embedding_norm uses."""
+    """DFS for a named entry, returning it whatever its type.
+
+    Deliberately NOT the `not isinstance(dict)` variant in relation.py: that one
+    hunts for an array leaf, but `relation_encoder` is a SUBTREE, and a leaf may
+    itself be a {'value': array} dict. Callers use _arr() to normalize.
+    """
     if isinstance(tree, dict):
-        if key in tree and not isinstance(tree[key], dict):
+        if key in tree:
             return tree[key]
         for value in tree.values():
             found = _find(value, key)
@@ -39,7 +53,7 @@ def _geglu(params, x):
     """RelationEncoder.mlp forward: out(gelu(gate(x)) * value(x))."""
 
     def lin(p, h):
-        return h @ np.asarray(p["kernel"], np.float64) + np.asarray(p["bias"], np.float64)
+        return h @ _arr(p["kernel"]) + _arr(p["bias"])
 
     def gelu(h):  # tanh approximation, matching nnx.gelu's default
         return 0.5 * h * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (h + 0.044715 * h**3)))
@@ -55,12 +69,23 @@ def main(checkpoint: str, dataset: str, n_frames: int) -> None:
 
     ckpt = pathlib.Path(checkpoint)
     params = _model_mod.restore_params(ckpt / "params", restore_type=np.ndarray)
-    enc = _find(params, "relation_encoder") or params["params"]["relation_encoder"]
-    if "mlp" not in enc:
-        enc = enc["relation_encoder"] if "relation_encoder" in enc else enc
-    scale = np.asarray(enc["scale"], np.float64)
-    table = np.asarray(_find(params, "input_embedding"), np.float64)
+    # Some checkpoints wrap the tree one level ({"params": {...}}), some don't.
+    while isinstance(params, dict) and set(params) == {"params"}:
+        params = params["params"]
+    print(f"top-level param keys: {sorted(params)}")
+
+    enc = _find(params, "relation_encoder")
+    if enc is None:
+        raise SystemExit(
+            "no 'relation_encoder' anywhere in the tree -- is this a relational "
+            f"checkpoint? top-level keys: {sorted(params)}"
+        )
+    print(f"relation_encoder subtree: {sorted(enc)}   mlp: {sorted(enc['mlp'])}")
+    scale = _arr(enc["scale"])
+    table = _arr(_find(params, "input_embedding"))
     width = table.shape[-1]
+    print(f"scale {scale.shape}, embedding table {table.shape}")
+    print()
 
     # ---- 2. the base the delta is added to -------------------------------
     sid = _rt.sentinel_token_id()
