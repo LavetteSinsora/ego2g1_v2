@@ -47,8 +47,9 @@ import time
 
 import numpy as np
 
-from ..core import layout
+from ..core import layout, relation_layout
 from . import actions as _actions
+from . import gripper_calib as _gripper_calib
 from . import latency as _latency
 from . import recorder as _recorder
 from . import safety as _safety
@@ -78,6 +79,7 @@ class DeployRunner:
                  recorder=None, limits: _safety.SafetyLimits | None = None,
                  fps: int = 30, max_steps: int = 10_000_000,
                  gated: bool = False, dataset: str | None = None,
+                 relation_mode: bool = False,
                  clock=time.monotonic, wait=precise_wait):
         self.adapter = adapter
         self.strategy = strategy
@@ -89,6 +91,14 @@ class DeployRunner:
         self.dt = 1.0 / self.fps
         self.max_steps = int(max_steps)
         self.dataset = dataset     # lerobot dataset root; enables reset_to_episode
+        # relation_eef mode ONLY: the observation side changes (live
+        # perception needs BOTH camera eyes + a scalar last-commanded
+        # gripper FRACTION, not the old modes' single eye + (6,)-vector
+        # hand command — docs/relation_deploy_plan.md §3.3/§5.5). The
+        # actuation side (executor row, clamp, watchdog) is untouched either
+        # way: everything below the adapter still only ever sees (26,)
+        # joint rows.
+        self.relation_mode = bool(relation_mode)
         self._clock = clock
         self._wait = wait
 
@@ -96,7 +106,12 @@ class DeployRunner:
         self.watchdog = _safety.Watchdog(self.limits, self._on_trip)
         # Hands start OPEN and thereafter track what we last COMMANDED — the
         # model's state hand-block is the command stream, never encoders.
-        self.last_hands = {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS}
+        # relation_mode: a scalar fraction per hand (0=open..1=closed, the
+        # same convention RelativeEEFRotvecChunks decodes/gripper_calib
+        # inverts), NOT the old modes' (6,)-motor-vector — there is no
+        # "hand block" in the 56-dim relation state, only a rounded grasp bit.
+        self.last_hands = ({h: 0.0 for h in relation_layout.HANDS} if self.relation_mode
+                           else {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS})
         self.steps_executed = 0
         self.running = False       # set/cleared around run(); read by telemetry()
         # Gate between idle (holding pose) and active (observe->infer->pop).
@@ -115,10 +130,52 @@ class DeployRunner:
     def _observe(self) -> dict:
         arm_q = self.executor.arm_q()
         image = self.camera.read() if self.camera is not None else None
+        prompt = getattr(self.adapter, "prompt", "")
+        if self.relation_mode:
+            return self._observe_relation(arm_q, image, prompt)
         return {"arm_q": arm_q,
                 "hand_cmds": {h: self.last_hands[h].copy() for h in layout.HANDS},
                 "image": image,
-                "prompt": getattr(self.adapter, "prompt", "")}
+                "prompt": prompt}
+
+    def _observe_relation(self, arm_q, image, prompt) -> dict:
+        """relation_eef variant: RelationPolicyAdapter's `perception=` path
+        (docs/relation_deploy_plan.md §5.5) needs BOTH camera eyes (for
+        `StereoSGBMDepthSource`) plus the last-commanded gripper FRACTION per
+        hand, not the old modes' single eye + (6,)-vector hand command. The
+        single `image` above is still sent — the model itself takes exactly
+        ONE egocentric image either way (camera.py's own docstring); only the
+        PERCEPTION input differs.
+        """
+        rgb_left = rgb_right = None
+        if self.camera is not None:
+            stereo = self.camera.read_stereo()
+            if stereo is not None:
+                rgb_left, rgb_right = stereo
+        hand_cmds_last = {h: float(self.last_hands[h]) for h in relation_layout.HANDS}
+        return {"arm_q": arm_q,
+                # kept for RelationPolicyAdapter.infer's unconditional
+                # `request["hand_cmds"]` read (unused by
+                # RelativeEEFRotvecChunks.convert — see actions.py — so the
+                # scalar shape here is harmless); hand_cmds_last is the one
+                # perception.observe() actually consumes.
+                "hand_cmds": dict(hand_cmds_last),
+                "hand_cmds_last": hand_cmds_last,
+                "image": image,
+                "rgb_left": rgb_left,
+                "rgb_right": rgb_right,
+                "prompt": prompt}
+
+    def _hand_frac_from_command(self, hand: str, cmd) -> float:
+        """relation_mode only: recover the scalar open/closed fraction from
+        the just-EXECUTED (6,)-motor command, for the NEXT tick's
+        `hand_cmds_last` — see `gripper_calib.frac_from_command`'s docstring
+        for why this inverts the executed row rather than reading the
+        converter's internal per-chunk `frac` directly. `self.adapter` is a
+        `RelationPolicyAdapter` (or test double exposing the same
+        `closed_pose` property) whenever `relation_mode` is True."""
+        closed_pose = self.adapter.closed_pose[hand]
+        return _gripper_calib.frac_from_command(cmd, closed_pose)
 
     # --- the loop ---------------------------------------------------------------
 
@@ -182,8 +239,12 @@ class DeployRunner:
                                       max_step=float(np.abs(
                                           before - row[_actions.ARM]).max()))
                 self.executor.send(row, t_command_target)
-                for i, h in enumerate(layout.HANDS):
-                    self.last_hands[h] = row[_actions.HAND[h]].copy()
+                for h in layout.HANDS:
+                    if self.relation_mode:
+                        self.last_hands[h] = self._hand_frac_from_command(
+                            h, row[_actions.HAND[h]])
+                    else:
+                        self.last_hands[h] = row[_actions.HAND[h]].copy()
                 self.recorder.log("action", step=step, row=row)
                 self.steps_executed = step + 1
 
@@ -268,6 +329,18 @@ class DeployRunner:
             raise RuntimeError("watchdog is tripped; nothing runs until restart")
         if self.dataset is None:
             raise RuntimeError("no --dataset given; reset-to-episode needs one")
+        if self.relation_mode:
+            # relation_eef's recorded dataset hand column (if/when one
+            # exists) is a scalar grasp bit, not the old modes' (6,)-motor
+            # vector this ramp's `hand_start`/`h0` interpolation assumes
+            # (ep["hand"][h][0], clipped to (6,)) — untested, undefined
+            # territory, not something this pass built. Fail loud rather
+            # than silently ramp toward a misinterpreted 6-vector.
+            raise NotImplementedError(
+                "reset_to_episode is not implemented for relation_eef mode "
+                "(the dataset hand-column format for this mode is not yet "
+                "defined — docs/relation_deploy_plan.md's Phase 2 scope "
+                "does not include dataset replay)")
         if not self._ctrl_lock.acquire(blocking=False):
             raise RuntimeError("busy — another reset is in progress")
         try:
@@ -402,10 +475,24 @@ class Args:
     rtc_execute_horizon: int | None = None
     # --- action mode: "auto" reads the checkpoint's control_mode from the
     # server handshake; override only to test a mismatched pairing on purpose.
-    action_mode: str = "auto"          # auto | joint | relative_eef
+    action_mode: str = "auto"          # auto | joint | relative_eef | relation_eef
     ik_iters: int = 25
     posture_cost: float = 0.05         # the measured smoothness knob
     collision_min_dist: float = 0.005
+    # --- relation_eef-only perception config (docs/relation_deploy_plan.md
+    # §5/§6). Unused by joint/relative_eef deploys — left None there, no new
+    # file is ever required for those modes. All three become REQUIRED the
+    # moment action_mode resolves to "relation_eef" (main() fails loud,
+    # naming exactly which is missing, before touching the robot/camera).
+    task_config: str | None = None     # YAML for perception/task_config.py's
+                                       # DeployTaskConfig (objects, in the
+                                       # checkpoint's fixed order, + hands)
+    stereo_calib: str | None = None    # .npz for perception/depth.py's
+                                       # StereoCalibration.load (head-camera
+                                       # stereo intrinsics/extrinsics)
+    camera_extrinsic: str | None = None   # .npz (key "T_pelvis_camera") from
+                                       # perception/touch_calib.py's
+                                       # solve_camera_extrinsic / _cli_solve
     # --- robot ---
     network_interface: str | None = None   # DDS iface; None joins the default domain
     fps: int = 0                       # 0 = the checkpoint's own fps
@@ -433,6 +520,110 @@ class Args:
     max_track_err: float = 0.10        # metres of IK tracking error before the e-stop
 
 
+def _resolve_action_mode(action_mode: str, control_mode: str) -> str:
+    """"auto" reads the checkpoint's control_mode off the server handshake
+    (`ego2g1/deploy/client.py`'s `PolicyClient.control_mode`) and picks the
+    matching action mode; any other value passes through unchanged (useful
+    only to deliberately test a mismatched pairing on purpose). Factored out
+    of `main()` so the auto-selection logic — in particular, that
+    `control_mode == "relation_eef"` selects `relation_eef` alongside the
+    existing `joint`/`relative_eef` cases — is directly unit-testable
+    without a real PolicyClient/websocket connection."""
+    if action_mode != "auto":
+        return action_mode
+    if control_mode == "joint":
+        return "joint"
+    if control_mode == "relation_eef":
+        return "relation_eef"
+    return "relative_eef"
+
+
+def _build_relation_adapter(args: "Args", client, fps: int):
+    """relation_eef mode's adapter: load task config + calibration, cross-
+    check against the server, wire a real detector/depth perception stack
+    into `RelationPolicyAdapter` (docs/relation_deploy_plan.md §5). Imports
+    are local to this function — joint/relative_eef deploys must never pay
+    for perception's cv2/DINO/SAM2 imports just by importing this module.
+
+    Fails loud, naming exactly what's missing, the moment `relation_eef` is
+    selected and any of `--task-config`/`--stereo-calib`/`--camera-extrinsic`
+    is absent — same "fail loud before it can silently mis-serve" philosophy
+    as `ego2g1/train/stamp.py`'s `check_supported` and
+    `perception/task_config.py`'s own `validate_against_server_metadata`.
+    """
+    from . import policy_adapter as _policy_adapter
+
+    missing = []
+    if not args.task_config:
+        missing.append("--task-config")
+    if not args.stereo_calib:
+        missing.append("--stereo-calib")
+    if not args.camera_extrinsic:
+        missing.append("--camera-extrinsic")
+    if missing:
+        raise ValueError(
+            f"action_mode=relation_eef needs {', '.join(missing)} (the "
+            "connected checkpoint's server control_mode advertises "
+            "'relation_eef' — see ego2g1/deploy/client.py's handshake). "
+            "relation_eef mode drives LIVE perception (object detection + "
+            "stereo depth + hand-relative geometry, "
+            "docs/relation_deploy_plan.md §5) every tick and refuses to "
+            "guess a task config, stereo calibration, or camera extrinsic "
+            "silently: --task-config is a YAML for "
+            "ego2g1.deploy.perception.task_config.load_task_config, "
+            "--stereo-calib is a .npz for "
+            "ego2g1.deploy.perception.depth.StereoCalibration.load, and "
+            "--camera-extrinsic is a .npz (key 'T_pelvis_camera') produced "
+            "by ego2g1.deploy.perception.touch_calib.solve_camera_extrinsic. "
+            "joint/relative_eef modes never need any of these.")
+
+    from .perception.depth import StereoCalibration, StereoSGBMDepthSource
+    from .perception.detector import GroundingDinoSam2Detector
+    from .perception.relation_perception import RelationPerception
+    from .perception.task_config import load_task_config, validate_against_server_metadata
+
+    task_config = load_task_config(args.task_config)
+    validate_against_server_metadata(task_config, client.metadata["ego2g1"])
+    calib = StereoCalibration.load(args.stereo_calib)
+    # touch_calib.py's own save convention (_cli_solve): np.savez(...,
+    # T_pelvis_camera=T, rms_residual_m=..., n_points=...) -- load the same
+    # key, don't invent a second convention for the same asset.
+    T_pelvis_camera = np.load(args.camera_extrinsic)["T_pelvis_camera"]
+
+    detector = GroundingDinoSam2Detector()
+    depth_source = StereoSGBMDepthSource(calib)
+    perception = RelationPerception(
+        task_config, detector, depth_source, calib, T_pelvis_camera, fps=fps)
+
+    return _policy_adapter.make_adapter(
+        "relation_eef", client, args.prompt, ik_iters=args.ik_iters,
+        posture_cost=args.posture_cost, collision_min_dist=args.collision_min_dist,
+        perception=perception)
+
+
+def _build_probe(action_mode: str, executor, cam, prompt: str) -> dict:
+    """The one-shot request dict `startup_self_check` runs the adapter
+    against, mode-aware: relation_eef's `RelationPolicyAdapter` (wired with
+    `perception=`) needs the stereo pair + a scalar hand fraction, not the
+    old modes' single eye + (6,)-vector hand command — see
+    `DeployRunner._observe_relation`, which this mirrors for the one probe
+    call that happens before the loop ever starts."""
+    arm_q = executor.arm_q()
+    if action_mode == "relation_eef":
+        hand_cmds_last = {h: 0.0 for h in relation_layout.HANDS}
+        rgb_left = rgb_right = None
+        stereo = cam.read_stereo() if cam is not None else None
+        if stereo is not None:
+            rgb_left, rgb_right = stereo
+        return {"arm_q": arm_q, "hand_cmds": dict(hand_cmds_last),
+                "hand_cmds_last": hand_cmds_last,
+                "image": cam.read() if cam is not None else None,
+                "rgb_left": rgb_left, "rgb_right": rgb_right, "prompt": prompt}
+    return {"arm_q": arm_q,
+            "hand_cmds": {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS},
+            "image": cam.read() if cam is not None else None, "prompt": prompt}
+
+
 def main(args: Args) -> None:
     from . import client as _client
     from . import policy_adapter as _policy_adapter
@@ -441,14 +632,16 @@ def main(args: Args) -> None:
     fps = args.fps or client.fps
     horizon = client.action_horizon
 
-    action_mode = args.action_mode
-    if action_mode == "auto":
-        action_mode = "joint" if client.control_mode == "joint" else "relative_eef"
-    adapter = (_policy_adapter.make_adapter(
-        "relative_eef", client, args.prompt, ik_iters=args.ik_iters,
-        posture_cost=args.posture_cost, collision_min_dist=args.collision_min_dist)
-        if action_mode == "relative_eef"
-        else _policy_adapter.make_adapter("joint", client, args.prompt))
+    action_mode = _resolve_action_mode(args.action_mode, client.control_mode)
+
+    if action_mode == "relation_eef":
+        adapter = _build_relation_adapter(args, client, fps)
+    elif action_mode == "relative_eef":
+        adapter = _policy_adapter.make_adapter(
+            "relative_eef", client, args.prompt, ik_iters=args.ik_iters,
+            posture_cost=args.posture_cost, collision_min_dist=args.collision_min_dist)
+    else:
+        adapter = _policy_adapter.make_adapter("joint", client, args.prompt)
     logger.info("action mode: %s (server control_mode=%s)", action_mode,
                 client.control_mode)
 
@@ -503,9 +696,7 @@ def main(args: Args) -> None:
         if args.skip_latency_check:
             logger.warning("latency self-check SKIPPED — never do this on hardware")
         else:
-            probe = {"arm_q": executor.arm_q(),
-                     "hand_cmds": {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS},
-                     "image": cam.read(), "prompt": args.prompt}
+            probe = _build_probe(action_mode, executor, cam, args.prompt)
             report = _latency.startup_self_check(
                 args.mode, lambda: adapter.infer(dict(probe)),
                 fps=fps, horizon=horizon, inference_hz=args.inference_hz,
@@ -518,7 +709,8 @@ def main(args: Args) -> None:
         runner = DeployRunner(adapter=adapter, strategy=strategy,
                               executor=executor, camera=cam, recorder=rec,
                               limits=limits, fps=fps, max_steps=args.max_steps,
-                              gated=gated, dataset=args.dataset)
+                              gated=gated, dataset=args.dataset,
+                              relation_mode=(action_mode == "relation_eef"))
         dash = None
         if args.dashboard:
             from .dashboard import Dashboard
