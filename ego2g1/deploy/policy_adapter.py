@@ -249,6 +249,16 @@ class RelationPolicyAdapter:
         return self._converter.last_tracking_error
 
     @property
+    def perception(self):
+        """The `RelationPerception` instance backing this adapter, or `None`
+        for the pass-through contract (see class docstring). Surfaced so
+        `runner.py`'s telemetry can pull dashboard-facing state
+        (`last_rgb_left`/`last_detections`/`recent_events()`) that lives on
+        the perception object itself, not in the per-tick `last_percept`
+        dict, without reaching into the private `_perception` attribute."""
+        return self._perception
+
+    @property
     def closed_pose(self) -> dict:
         """The converter's per-hand `BRAINCO_CLOSED_POSE`-shaped (6,) array
         (`ego2g1.deploy.gripper_calib`, possibly overridden at construction).

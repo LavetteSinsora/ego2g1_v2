@@ -264,3 +264,83 @@ class TestLatchIntegration:
         perception.observe(_rgb(), _rgb(), flange, {"left": 0.0})
         out = perception.observe(_rgb(), _rgb(), flange, {"left": 1.0})
         assert out["latch"]["left"].state == LatchState.UNLATCHED
+
+
+class TestDashboardHooks:
+    """The dashboard-facing state added on top of `observe()`'s return
+    contract (see docs/relation_deploy_plan.md's dashboard-overlay plan):
+    the raw detector output kept around for image overlays, and a bounded
+    latch/hand-closed event log for a timeline strip. None of this changes
+    `observe()`'s existing return value -- purely additive instance state.
+    """
+
+    def test_last_rgb_left_and_detections_populate_on_detector_tick(self):
+        perception, detector = _perception()
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        rgb = _rgb()
+        rgb[0, 0] = [7, 8, 9]   # a distinguishing marker, not all-zero
+
+        perception.observe(rgb, _rgb(), flange, {"left": 0.0, "right": 0.0})
+
+        assert perception.last_rgb_left is rgb
+        assert set(perception.last_detections) == {
+            o.instance_id for o in perception.task_config.objects
+        }
+        for obj in perception.task_config.objects:
+            assert perception.last_detections[obj.instance_id].confidence == 0.9
+
+    def test_last_detections_not_overwritten_between_detector_ticks(self):
+        perception, detector = _perception(detector_period_ticks=4)
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        hand_cmds = {"left": 0.0, "right": 0.0}
+
+        perception.observe(_rgb(), _rgb(), flange, hand_cmds)   # tick 0: detector runs
+        first = perception.last_detections
+        perception.observe(_rgb(), _rgb(), flange, hand_cmds)   # tick 1: no detector call
+        assert perception.last_detections is first   # untouched, not cleared
+
+    def test_recent_events_logs_hand_closed_transition_once(self):
+        perception, detector = _perception(task_config=_task_config(hands=("left",)))
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX + 20.0, CY))
+        flange = {"left": np.eye(4)}
+
+        perception.observe(_rgb(), _rgb(), flange, {"left": 0.0})   # first tick: logs initial "open"
+        perception.observe(_rgb(), _rgb(), flange, {"left": 0.0})   # steady: no new event
+        perception.observe(_rgb(), _rgb(), flange, {"left": 1.0})   # flips: logs "closed"
+
+        hand_events = [e for e in perception.recent_events() if e["kind"] == "hand"]
+        assert [e["closed"] for e in hand_events] == [False, True]
+
+    def test_recent_events_logs_latch_state_transitions(self):
+        """Same converging-trajectory scenario as
+        TestLatchIntegration.test_hand_closing_on_a_consistently_moving_object_reaches_latched,
+        just also asserting the dashboard-facing event log records the
+        unlatched -> candidate -> latched path."""
+        cfg = _task_config(hands=("left",))
+        perception, detector = _perception(
+            task_config=cfg, latch_config=LatchConfig(confirm_window_ticks=5, max_track_loss_ticks=1)
+        )
+        target = cfg.objects[1].instance_id
+        for obj in cfg.objects:
+            u = CX if obj.instance_id == target else CX + 20.0
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, u, CY))
+
+        flange = {"left": np.eye(4)}
+        perception.observe(_rgb(), _rgb(), flange, {"left": 0.0})
+
+        for k in range(1, 8):
+            hand_t = np.array([0.0, 0.0, 1.0]) + np.array([0.001 * k, 0.0, 0.0])
+            flange_k = {"left": np.eye(4)}
+            flange_k["left"][:3, 3] = hand_t
+            shift_u = CX + FX * (0.001 * k) / 1.0
+            detector.set_detection(target, _box_detection(target, shift_u, CY))
+            perception.observe(_rgb(), _rgb(), flange_k, {"left": 1.0})
+
+        latch_events = [e for e in perception.recent_events() if e["kind"] == "latch"]
+        assert [e["state"] for e in latch_events] == ["unlatched", "candidate", "latched"]
+        assert latch_events[-1]["object"] == target

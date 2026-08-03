@@ -256,6 +256,71 @@ def test_deploy_runner_relation_eef_last_hands_starts_open_scalar():
         assert isinstance(runner.last_hands[h], float)
 
 
+def test_telemetry_relation_field_after_relation_eef_run(kin_smooth):
+    """`DeployRunner.telemetry()`'s new `"relation"` key (the dashboard's
+    detector/tracker/latch overlay data, docs/relation_deploy_plan.md's
+    dashboard-overlay plan): populated + JSON-serializable after a real
+    relation_eef rollout, with per-object detection/tracking info and
+    per-hand grasp/latch state matching what `RelationPerception.observe`
+    actually computed."""
+    import json
+
+    task_config = _task_config()
+    detector = _fake_detector(task_config)
+    perception = RelationPerception(
+        task_config, detector, _StaticDepth(), _calib(),
+        T_pelvis_camera=np.eye(4), fps=FPS)
+
+    client = _FakeRelationClient(horizon=4)
+    adapter = RelationPolicyAdapter(client, "task", kin=kin_smooth, perception=perception)
+
+    q0 = _nominal_q0()
+    executor = MockExecutor(fps=FPS, initial_q=q0)
+    executor.connect()
+    cam = StaticCamera(shape=(64, 64, 3))
+    cam.connect()
+
+    strategy = SynchronousStrategy(adapter, chunk_size=client.action_horizon)
+    runner = DeployRunner(adapter=adapter, strategy=strategy, executor=executor,
+                          camera=cam, fps=FPS, wait=NO_WAIT,
+                          relation_mode=True, max_steps=8)
+    runner.run()
+
+    t = runner.telemetry()
+    json.dumps(t)   # must be JSON-serializable, same as every other field
+    rel = t["relation"]
+    assert rel is not None
+
+    obj_ids = {o["instance_id"] for o in rel["objects"]}
+    assert obj_ids == {o.instance_id for o in task_config.objects}
+    for o in rel["objects"]:
+        assert o["tracked"] is True
+        assert o["confidence"] == pytest.approx(0.9)
+        assert o["box_xyxy"] is not None
+        assert o["position_pelvis"] is not None
+
+    hands_by_name = {h["hand"]: h for h in rel["hands"]}
+    assert set(hands_by_name) == set(task_config.hands)
+    for h in task_config.hands:
+        # client always commands grippers CLOSED (+1) -- see
+        # _FakeRelationClient -- so both hands read as closed
+        assert hands_by_name[h]["hand_closed"] is True
+        assert hands_by_name[h]["state"] in ("unlatched", "candidate", "latched")
+
+    assert isinstance(rel["events"], list)
+
+
+def test_telemetry_relation_is_none_outside_relation_mode():
+    """joint/relative_eef deploys have no perception stack at all -- the
+    dashboard's overlay panels must see a clean `None`, not a crash."""
+    executor = MockExecutor(fps=FPS)
+    executor.connect()
+    runner = DeployRunner(
+        adapter=object(), strategy=object(), executor=executor,
+        fps=FPS, wait=NO_WAIT, relation_mode=False)
+    assert runner.telemetry()["relation"] is None
+
+
 def test_reset_to_episode_refuses_in_relation_mode():
     executor = MockExecutor(fps=FPS)
     executor.connect()

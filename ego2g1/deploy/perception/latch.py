@@ -165,6 +165,15 @@ class GraspLatch:
     def latched_object(self) -> str | None:
         return self._latched_object
 
+    @property
+    def rigid_pose(self) -> np.ndarray | None:
+        """This tick's frozen-transform prediction (`hand_pose @ T_hand_object`),
+        set whenever CANDIDATE or LATCHED, else `None`. Surfaced read-only so a
+        caller (e.g. the dashboard's overlay renderer) can compare it against
+        the live-tracked pose exactly like `update()`'s own divergence check
+        does, without reaching into a private attribute."""
+        return self._rigid_pose
+
     def reset(self):
         """Force UNLATCHED, discarding any in-progress candidate. Not needed
         in normal operation (release already resets cleanly) -- provided for

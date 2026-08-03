@@ -114,6 +114,11 @@ class DeployRunner:
                            else {h: np.zeros(layout.HAND_DIM) for h in layout.HANDS})
         self.steps_executed = 0
         self.running = False       # set/cleared around run(); read by telemetry()
+        # relation_eef only: high-water mark for latch/hand-state events
+        # already drained into the recorder (see run()'s step 4b) -- -inf so
+        # the very first tick's events (which may predate this instant on
+        # some monotonic-clock bases) are never silently skipped.
+        self._last_drained_event_t = float("-inf")
         # Gate between idle (holding pose) and active (observe->infer->pop).
         # `gated` launches idle: the dashboard's Start button calls begin().
         self._active = threading.Event()
@@ -254,6 +259,24 @@ class DeployRunner:
                     self.watchdog.check_tracking(float(err))
                     if err > 0:
                         self.recorder.log("tracking", step=step, worst_m=float(err))
+
+                # 4b. relation_eef only: drain new latch/hand-closed
+                # transitions (RelationPerception's own bounded event log,
+                # for the dashboard's timeline) into events.jsonl -- reuses
+                # the existing recorder mechanism, no new file format.
+                if self.relation_mode:
+                    perception = getattr(self.adapter, "perception", None)
+                    if perception is not None:
+                        for ev in perception.recent_events(
+                                since_t=self._last_drained_event_t):
+                            kind = "latch" if ev["kind"] == "latch" else "hand_state"
+                            # ev's own "kind"/"t" would collide with log()'s
+                            # positional `kind` / self-stamped "t" -- keep the
+                            # original event time distinctly as "event_t".
+                            fields = {k: v for k, v in ev.items()
+                                     if k not in ("kind", "t")}
+                            self.recorder.log(kind, event_t=ev["t"], **fields)
+                            self._last_drained_event_t = ev["t"]
 
                 # 5. pace
                 self._wait(t_cycle_end)
@@ -454,7 +477,72 @@ class DeployRunner:
             "arm_q": ex.get("arm_q"),
             "state_age": ex.get("state_age"),
             "estopped": bool(ex.get("estopped")),
+            # --- relation_eef perception stack (detector/tracker/latch) ---
+            # None for joint/relative_eef deploys, or before the first tick's
+            # perception has run -- the dashboard treats both as "n/a".
+            "relation": self._relation_telemetry() if self.relation_mode else None,
         }
+
+    def _relation_telemetry(self) -> dict | None:
+        """`relation_eef`-only: a JSON-safe snapshot of the last perception
+        tick's per-object detections + per-hand grasp/latch state, plus the
+        recent latch/hand-closed event history, for the dashboard's overlay
+        panels and timeline strip. Reads only already-computed state off the
+        adapter/`RelationPerception` (no new perception work happens here) --
+        same pure-pull contract as the rest of `telemetry()`."""
+        perception = getattr(self.adapter, "perception", None)
+        percept = getattr(self.adapter, "last_percept", None)
+        return build_relation_telemetry(perception, percept)
+
+
+def build_relation_telemetry(perception, percept) -> dict | None:
+    """`DeployRunner._relation_telemetry`'s body, factored out as a free
+    function: a JSON-safe dashboard snapshot from a `RelationPerception`
+    instance and its last `observe()` result. Shared by `DeployRunner
+    .telemetry()` and any lighter-weight caller that also wants the
+    dashboard's overlay/status panels fed correctly without a real robot/
+    policy attached (e.g. a perception-only preview tool)."""
+    if perception is None or percept is None:
+        return None
+
+    hands = tuple(perception.task_config.hands)
+    state = np.asarray(percept["state"])
+    grasp_bits = state[-len(hands):] if hands else np.zeros(0)
+    hand_closed = {h: bool(grasp_bits[i] >= 0.5) for i, h in enumerate(hands)}
+
+    objects = []
+    for obj in perception.task_config.objects:
+        debug = percept["objects"].get(obj.instance_id)
+        detection = perception.last_detections.get(obj.instance_id)
+        pose = debug.pose_pelvis if debug is not None else None
+        objects.append({
+            "instance_id": obj.instance_id,
+            "detected_this_tick": bool(debug.detected_this_tick) if debug else False,
+            "tracked": bool(debug.tracked) if debug else False,
+            "depth_m": debug.depth_m if debug else None,
+            "confidence": (float(detection.confidence)
+                          if detection is not None else None),
+            "box_xyxy": (detection.box_xyxy.tolist()
+                        if detection is not None and detection.box_xyxy is not None
+                        else None),
+            "position_pelvis": pose[:3, 3].tolist() if pose is not None else None,
+        })
+
+    hand_states = []
+    for h in hands:
+        result = percept["latch"][h]
+        hand_states.append({
+            "hand": h,
+            "hand_closed": hand_closed[h],
+            "state": result.state.value,
+            "candidate_object": result.candidate_object,
+            "latched_object": result.latched_object,
+            "ticks_in_candidate": result.ticks_in_candidate,
+            "reason": result.reason,
+        })
+
+    return {"objects": objects, "hands": hand_states,
+            "events": perception.recent_events()}
 
 
 # --- CLI assembly -----------------------------------------------------------------

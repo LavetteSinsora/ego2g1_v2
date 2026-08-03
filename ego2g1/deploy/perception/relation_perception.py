@@ -61,7 +61,9 @@ one is.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
+import time
 from typing import Callable
 
 import numpy as np
@@ -194,6 +196,36 @@ class RelationPerception:
         }
         self._tick = 0
 
+        # Dashboard-facing state: NOT part of observe()'s return contract,
+        # additive instance state a caller (the dashboard's HTTP thread) can
+        # read after the fact. `last_rgb_left`/`last_detections` are only
+        # refreshed on detector-cadence ticks (~2Hz) -- overlay pixel coords
+        # (mask/box_xyxy) are only valid against `last_rgb_left`, which is
+        # NOT necessarily the same eye `camera.py`'s configured `read()`
+        # returns for the dashboard's main camera pane.
+        self.last_rgb_left: np.ndarray | None = None
+        self.last_detections: dict[str, Detection] = {}
+        self._events: collections.deque = collections.deque(maxlen=500)
+        self._prev_hand_closed: dict[str, bool] = {}
+        self._prev_latch_state: dict[str, str] = {}   # LatchState.value strings
+
+    @property
+    def latches(self) -> dict[str, GraspLatch]:
+        """Read-only view of this hand's `GraspLatch` instances, keyed by
+        hand -- surfaced so a caller (the dashboard's overlay renderer) can
+        read `.rigid_pose`/`.state`/`.latched_object` without reaching into
+        the private `_latches` attribute."""
+        return dict(self._latches)
+
+    @property
+    def trackers(self) -> dict[str, ObjectTracker]:
+        """Read-only view of the per-object `ObjectTracker`s, keyed by
+        instance_id -- surfaced so a caller (the dashboard's overlay
+        renderer) can read `.pose` (the live Kalman/OneEuro-smoothed
+        estimate) for objects that currently have one, without reaching
+        into the private `_trackers` attribute."""
+        return dict(self._trackers)
+
     def _nominal_rotation(self, instance_id: str) -> np.ndarray:
         return np.asarray(
             self._nominal_rotations.get(instance_id, np.eye(3, dtype=np.float64)),
@@ -211,6 +243,39 @@ class RelationPerception:
                 initial_rotation=initial_pose[:3, :3],
             )
         return self._trackers[instance_id]
+
+    def _log_transitions(self, hand_closed: dict, latch_results: dict) -> None:
+        """Append a dashboard-facing event for each hand whose commanded
+        open/closed bit or latch state changed since the LAST tick (plus the
+        very first observed value per hand, so the timeline isn't empty
+        before any transition happens) -- never on a steady, unchanged tick.
+        Pure bookkeeping; does not affect `observe()`'s return contract."""
+        now = time.monotonic()
+        for h, closed in hand_closed.items():
+            if self._prev_hand_closed.get(h) != closed:
+                self._events.append({
+                    "t": now, "hand": h, "kind": "hand", "closed": bool(closed),
+                })
+            self._prev_hand_closed[h] = closed
+
+        for h, result in latch_results.items():
+            state = result.state.value
+            if self._prev_latch_state.get(h) != state:
+                self._events.append({
+                    "t": now, "hand": h, "kind": "latch", "state": state,
+                    "object": result.latched_object or result.candidate_object,
+                    "reason": result.reason,
+                })
+            self._prev_latch_state[h] = state
+
+    def recent_events(self, since_t: float | None = None) -> list[dict]:
+        """Latch/hand-closed transitions, oldest first, JSON-safe already.
+        `since_t`: only events strictly after this `time.monotonic()` value
+        (e.g. the runner draining new events into the recorder each tick);
+        `None` returns the full bounded history (dashboard's `/state` poll)."""
+        if since_t is None:
+            return list(self._events)
+        return [e for e in self._events if e["t"] > since_t]
 
     def observe(
         self,
@@ -239,6 +304,13 @@ class RelationPerception:
         if run_detector_this_tick:
             depth_map = self.depth_source.estimate(rgb_left, rgb_right)
             detections = self.detector.detect(rgb_left, self.task_config.objects)
+            # Dashboard-facing: the raw detector output (mask/box/confidence)
+            # would otherwise be discarded once depth is sampled below --
+            # keep the exact frame it was measured against alongside it,
+            # since overlay pixel coords are only valid on THIS frame (see
+            # class docstring / __init__ comment).
+            self.last_rgb_left = rgb_left
+            self.last_detections = dict(detections)
         else:
             # Between detector refreshes: no new 2D/depth measurement at
             # all, for ANY object -- every object falls through to the
@@ -317,6 +389,7 @@ class RelationPerception:
                 tracked_object_poses=tracked_poses_pelvis,
                 eligible_objects=eligible,
             )
+        self._log_transitions(hand_closed, latch_results)
 
         final_poses: dict[str, np.ndarray | None] = {}
         for obj in self.task_config.objects:

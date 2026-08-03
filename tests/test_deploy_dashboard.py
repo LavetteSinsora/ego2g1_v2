@@ -175,6 +175,65 @@ def test_http_state_page_and_estop():
         dash.stop()
 
 
+def test_perception_jpg_endpoint():
+    """`/perception.jpg` (the relation_eef overlay: DINO/SAM2 boxes+masks +
+    the live fast-tracker position) is 204 before any detection has
+    happened, and a real JPEG once `RelationPerception.observe` has run --
+    tested against a minimal loop/adapter stub (not a full DeployRunner
+    rollout; the endpoint only reads `loop.adapter.perception`, see
+    `Dashboard.encode_perception_frame`)."""
+    from ego2g1.deploy.perception.depth import StereoCalibration
+    from ego2g1.deploy.perception.detector import Detection, FakeDetector
+    from ego2g1.deploy.perception.relation_perception import RelationPerception
+    from ego2g1.deploy.perception.task_config import DeployTaskConfig, ObjectSpec
+
+    task_config = DeployTaskConfig(
+        objects=(ObjectSpec("obj0", "cube", "a cube .", graspable=True),),
+        hands=("left",))
+    detector = FakeDetector()
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:30, 20:30] = True
+    detector.set_detection("obj0", Detection(
+        instance_id="obj0", confidence=0.85, mask=mask,
+        box_xyxy=np.array([20.0, 20.0, 30.0, 30.0])))
+
+    class _StaticDepth:
+        def estimate(self, rgb_left, rgb_right):
+            return np.full((64, 64), 1.0, dtype=np.float32)
+
+    calib = StereoCalibration(
+        K_left=np.array([[50.0, 0, 32.0], [0, 50.0, 32.0], [0, 0, 1]]),
+        K_right=np.eye(3), dist_left=np.zeros(5), dist_right=np.zeros(5),
+        R=np.eye(3), T=np.array([0.06, 0.0, 0.0]), image_size=(64, 64))
+    perception = RelationPerception(
+        task_config, detector, _StaticDepth(), calib,
+        T_pelvis_camera=np.eye(4), fps=30)
+
+    class _AdapterStub:
+        perception = None
+
+    class _LoopStub:
+        adapter = _AdapterStub()
+
+    loop = _LoopStub()
+    loop.adapter.perception = perception
+    dash = Dashboard(loop, port=0)
+    dash.start()
+    base = f"http://127.0.0.1:{dash.port}"
+    try:
+        code, _ = _get(base + "/perception.jpg")   # no observe() yet -> 204
+        assert code == 204
+
+        rgb = np.zeros((64, 64, 3), dtype=np.uint8)
+        perception.observe(rgb, rgb, {"left": np.eye(4)}, {"left": 0.0})
+
+        code, body = _get(base + "/perception.jpg")
+        assert code == 200
+        assert body[:2] == b"\xff\xd8"   # JPEG magic bytes
+    finally:
+        dash.stop()
+
+
 def _post(url, body=None):
     data = json.dumps(body).encode() if body is not None else b""
     req = urllib.request.Request(url, data=data, method="POST",

@@ -32,6 +32,33 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# --- relation_eef perception overlay (encode_perception_frame) -------------
+
+_PALETTE = [(66, 133, 244), (219, 68, 55), (15, 157, 88), (244, 160, 0),
+           (171, 71, 188), (0, 172, 193)]         # per-instance_id, RGB
+_TRACK_COLOR = (255, 255, 255)   # live Kalman/OneEuro fast-tracker position
+_LATCH_COLOR = (255, 90, 0)      # GraspLatch's rigid-predicted pose
+
+
+def _project_to_pixel(point_pelvis: np.ndarray, T_pelvis_camera: np.ndarray,
+                      K: np.ndarray):
+    """(3,) pelvis-frame point -> (u, v) pixel ints, or None if behind the
+    camera. Inverse of `relation_perception.pixel_depth_to_camera_point`'s
+    back-projection, through the same `T_pelvis_camera`/`K_left` convention
+    (`point_pelvis = R @ point_camera + t` -> `point_camera = R.T @
+    (point_pelvis - t)`)."""
+    R = T_pelvis_camera[:3, :3]
+    t = T_pelvis_camera[:3, 3]
+    point_camera = R.T @ (np.asarray(point_pelvis, dtype=np.float64) - t)
+    z = float(point_camera[2])
+    if z <= 1e-6:
+        return None
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    u = cx + point_camera[0] * fx / z
+    v = cy + point_camera[1] * fy / z
+    return int(round(u)), int(round(v))
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     # The owning Dashboard is attached to the server as `.dash`.
@@ -53,6 +80,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, "application/json", body)
         elif path == "/frame.jpg":
             jpg = dash.encode_frame()
+            if jpg is None:
+                self.send_response(204)
+                self.end_headers()
+                return
+            self._send(200, "image/jpeg", jpg)
+        elif path == "/perception.jpg":
+            jpg = dash.encode_perception_frame()
             if jpg is None:
                 self.send_response(204)
                 self.end_headers()
@@ -154,6 +188,63 @@ class Dashboard:
             img = cv2.resize(img, (self.frame_width, max(1, int(round(h * scale)))),
                              interpolation=cv2.INTER_AREA)
         bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)   # camera hands out RGB
+        ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return buf.tobytes() if ok else None
+
+    def encode_perception_frame(self):
+        """`relation_eef`-only: the last detector-cadence frame (rgb_left)
+        annotated with DINO+SAM2 boxes/masks, the live Kalman/OneEuro fast-
+        tracker position per object (NOT CoTracker -- this repo's live
+        pipeline doesn't use it, see `perception/tracker.py`'s docstring),
+        and, while a hand is CANDIDATE/LATCHED, the rigid-predicted pose
+        `latch.py` is comparing it against -- JPEG bytes, or None if
+        relation_eef perception hasn't produced a frame yet. All drawing
+        happens HERE, on the dashboard's own HTTP thread, on each request --
+        same hot-path isolation guarantee as `encode_frame()`."""
+        perception = getattr(getattr(self.loop, "adapter", None), "perception", None)
+        if perception is None or perception.last_rgb_left is None:
+            return None
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        img = np.ascontiguousarray(perception.last_rgb_left).copy()
+        for i, (instance_id, det) in enumerate(perception.last_detections.items()):
+            color = _PALETTE[i % len(_PALETTE)]
+            if det.mask is not None:
+                layer = np.zeros_like(img)
+                layer[det.mask] = color
+                img = cv2.addWeighted(img, 1.0, layer, 0.4, 0.0)
+            if det.box_xyxy is not None:
+                x0, y0, x1, y1 = (int(round(v)) for v in det.box_xyxy)
+                cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+                cv2.putText(img, f"{instance_id} {det.confidence:.2f}",
+                           (x0, max(12, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, color, 1, cv2.LINE_AA)
+
+        K = perception.calib.K_left
+        T_pelvis_camera = perception.T_pelvis_camera
+        for instance_id, tracker in perception.trackers.items():
+            uv = _project_to_pixel(tracker.pose[:3, 3], T_pelvis_camera, K)
+            if uv is not None:
+                cv2.circle(img, uv, 5, _TRACK_COLOR, -1, cv2.LINE_AA)
+                cv2.putText(img, "tracked", (uv[0] + 7, uv[1] + 4),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TRACK_COLOR, 1,
+                           cv2.LINE_AA)
+        for hand, latch in perception.latches.items():
+            rigid_pose = latch.rigid_pose
+            if rigid_pose is None:
+                continue
+            uv = _project_to_pixel(rigid_pose[:3, 3], T_pelvis_camera, K)
+            if uv is not None:
+                cv2.drawMarker(img, uv, _LATCH_COLOR, cv2.MARKER_TILTED_CROSS,
+                               14, 2, cv2.LINE_AA)
+                cv2.putText(img, f"predicted ({hand})", (uv[0] + 9, uv[1] - 6),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, _LATCH_COLOR, 1,
+                           cv2.LINE_AA)
+
+        bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return buf.tobytes() if ok else None
 
@@ -264,6 +355,11 @@ class _DemoLoop:
                          "reason": "dashboard" if self._tripped else None},
             "arm_q": row[:14].tolist(), "state_age": 0.003,
             "estopped": self._tripped,
+            # not exercised in --demo (see plan: real hardware/a real
+            # relation_eef run is needed to populate this) -- present so
+            # test_demo_loop_matches_runner_telemetry_shape's key-subset
+            # check still passes for real relation_eef runners.
+            "relation": None,
         }
 
 
@@ -353,6 +449,11 @@ canvas{display:block;width:100%}
 .epin{width:64px;font:inherit;padding:6px 8px;border-radius:8px;
   border:1px solid var(--hair);background:var(--surface2);color:var(--ink);
   font-variant-numeric:tabular-nums}
+.objrow{display:flex;justify-content:space-between;gap:10px;padding:4px 0;
+  border-bottom:1px solid var(--hair);font-variant-numeric:tabular-nums}
+.objrow:last-child{border-bottom:none}
+#percep{display:block;width:100%;max-width:360px;border-radius:8px;
+  background:var(--surface2);aspect-ratio:3/2;object-fit:cover}
 </style></head>
 <body><div class="wrap">
   <div class="head">
@@ -407,6 +508,29 @@ canvas{display:block;width:100%}
       <span><i class="sw" style="background:var(--hand-r)"></i>R hand</span>
     </div>
   </div>
+
+  <div id="relationCard" style="display:none">
+    <div class="row" style="margin-top:14px">
+      <div class="card camwrap"><div class="title">perception &nbsp;·&nbsp; DINO+SAM2 detection &amp; fast tracker</div>
+        <img id="percep" alt="perception overlay"></div>
+      <div class="card status"><div class="title">objects</div>
+        <div id="objList"></div>
+      </div>
+    </div>
+    <div class="card"><div class="title">grasp / kinematic latch</div>
+      <div class="grid4" id="handList"></div>
+    </div>
+    <div class="card"><div class="title">latch &amp; hand-closed timeline &nbsp;·&nbsp; last 30s</div>
+      <canvas id="latchTimeline" height="70"></canvas>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--cursor)"></i>hand closed</span>
+        <span><i class="sw" style="background:var(--warn)"></i>candidate</span>
+        <span><i class="sw" style="background:var(--committed)"></i>latched</span>
+      </div>
+    </div>
+  </div>
+  <div class="sub" id="relationNA" style="margin-top:14px">
+    relation_eef perception: n/a (this run is not in relation_eef mode)</div>
 
   <div class="card"><div class="title">loop health</div>
     <div class="grid4">
@@ -501,6 +625,98 @@ function refreshCam(){
   nx.onload=()=>{img.src=nx.src;}; nx.src="/frame.jpg?t="+Date.now();
 }
 
+let lastPercep=0;
+function refreshPercep(){
+  // ~5Hz: plenty for a ~2Hz detector refresh + a moving tracker marker,
+  // without paying mask-compositing cost (cv2.addWeighted) every /state poll.
+  const now=performance.now(); if(now-lastPercep<200)return; lastPercep=now;
+  const img=$("percep"); const nx=new Image();
+  nx.onload=()=>{img.src=nx.src;}; nx.src="/perception.jpg?t="+Date.now();
+}
+
+function drawLatchTimeline(events, nowT){
+  const c=$("latchTimeline");const [g,W,H]=fitCanvas(c);g.clearRect(0,0,W,H);
+  events=events||[];
+  const hands=[...new Set(events.map(e=>e.hand))];
+  if(!hands.length){
+    g.fillStyle=css("--muted");g.font="11px system-ui";g.textAlign="left";
+    g.fillText("no latch/hand-closed events yet",8,H/2+4);
+    return;
+  }
+  const windowS=30, padX=8, padTop=6, padBot=16;
+  const laneH=(H-padTop-padBot)/hands.length;
+  const xFor=t=>Math.max(padX, Math.min(W-padX,
+              W-padX-((nowT-t)/windowS)*(W-2*padX)));
+  const stateColor=s=>s==="latched"?css("--committed"):s==="candidate"?css("--warn"):null;
+  hands.forEach((h,li)=>{
+    const y=padTop+li*laneH;
+    const evs=events.filter(e=>e.hand===h).sort((a,b)=>a.t-b.t);
+    let closedSince=null, stateSince=null, curState=null;
+    for(const e of evs){
+      if(e.kind==="hand"){
+        if(e.closed) closedSince=e.t;
+        else if(closedSince!=null){
+          g.fillStyle=css("--cursor");
+          const x0=xFor(closedSince), x1=xFor(e.t);
+          g.fillRect(x0,y+laneH*0.55,Math.max(1,x1-x0),laneH*0.35);
+          closedSince=null;
+        }
+      } else {
+        if(stateSince!=null){
+          const col=stateColor(curState);
+          if(col){g.fillStyle=col;
+            const x0=xFor(stateSince), x1=xFor(e.t);
+            g.fillRect(x0,y+laneH*0.05,Math.max(1,x1-x0),laneH*0.4);}
+        }
+        stateSince=e.t; curState=e.state;
+      }
+    }
+    if(closedSince!=null){g.fillStyle=css("--cursor");
+      const x0=xFor(closedSince);
+      g.fillRect(x0,y+laneH*0.55,Math.max(1,W-padX-x0),laneH*0.35);}
+    if(stateSince!=null){const col=stateColor(curState);
+      if(col){g.fillStyle=col;const x0=xFor(stateSince);
+        g.fillRect(x0,y+laneH*0.05,Math.max(1,W-padX-x0),laneH*0.4);}}
+    g.fillStyle=css("--ink2");g.font="10px system-ui";g.textAlign="left";
+    g.fillText(h,padX,y+laneH-3);
+  });
+}
+
+function renderRelation(t){
+  const rel=t.relation;
+  if(!rel){
+    $("relationCard").style.display="none";
+    $("relationNA").style.display="";
+    return;
+  }
+  $("relationCard").style.display="";
+  $("relationNA").style.display="none";
+  refreshPercep();
+
+  const ol=$("objList"); ol.innerHTML="";
+  for(const o of rel.objects){
+    const mark=o.detected_this_tick?"●":(o.tracked?"○":"—");
+    const row=document.createElement("div"); row.className="objrow";
+    row.innerHTML=`<span>${mark} ${o.instance_id}</span>`+
+      `<span>${o.depth_m!=null?fmt(o.depth_m,2)+" m":"—"}</span>`;
+    ol.appendChild(row);
+  }
+
+  const hl=$("handList"); hl.innerHTML="";
+  for(const h of rel.hands){
+    const label = h.state==="latched" ? ("LATCHED → "+h.latched_object)
+                : h.state==="candidate" ? ("candidate → "+h.candidate_object)
+                : "unlatched";
+    const div=document.createElement("div"); div.className="stat";
+    div.innerHTML=`<div class="n" style="color:${h.hand_closed?css('--crit'):css('--good')}">`+
+      `${h.hand_closed?"closed":"open"}</div>`+
+      `<div class="l">${h.hand} · ${label}</div>`;
+    hl.appendChild(div);
+  }
+
+  drawLatchTimeline(rel.events, t.now);
+}
+
 async function tick(){
   try{
     const t=await (await fetch("/state",{cache:"no-store"})).json();
@@ -527,6 +743,7 @@ async function tick(){
     // bar
     $("barsub").textContent=t.ready?("index "+t.index+" / "+t.horizon+(t.d!=null?"  ·  d="+t.d:"")):"waiting for first chunk…";
     drawBar(t); drawStrip(t);
+    renderRelation(t);
     // health
     const s=t.stats||{};
     $("s-chunks").textContent=s.chunks??"—"; $("s-ticks").textContent=s.ticks??"—";
