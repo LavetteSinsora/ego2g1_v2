@@ -398,17 +398,23 @@ def tcp_orientation() -> None:
 # --- 4. camera ---------------------------------------------------------------
 
 def camera(host: str = "192.168.123.164", eye: str = "left",
-           out: str = "check_camera.png") -> None:
+           out: str = "check_camera.png", auto_start_server: bool = True) -> None:
     """Grab one frame and write it out. Then LOOK AT IT next to a training frame.
 
     This is the highest-risk open item in the deployment: the model trained on
     Pico-headset egocentric video, and a systematically different viewpoint
-    fails quietly and looks like a bad policy."""
+    fails quietly and looks like a bad policy.
+
+    `auto_start_server=True` (default): SSH into `host` and start
+    `image_server.py` there if it isn't already reachable, instead of just
+    failing with "is it running?" -- see `remote_image_server.py`'s module
+    docstring. Set False to get the old fail-fast behavior (e.g. if you're
+    intentionally testing that the server ISN'T up)."""
     import cv2
 
     from .camera import HeadCamera
 
-    cam = HeadCamera(host=host, eye=eye)
+    cam = HeadCamera(host=host, eye=eye, auto_start_server=auto_start_server)
     cam.connect()
     img = cam.read()
     cam.close()
@@ -437,7 +443,7 @@ def _next_pair_index(out_path) -> int:
 
 
 def stereo_capture(host: str = "192.168.123.164", out_dir: str = "calib_images",
-                   timeout: float = 10.0) -> None:
+                   timeout: float = 10.0, auto_start_server: bool = True) -> None:
     """Grab ONE stereo pair (both eyes, from the same wire frame) and save it
     as an auto-numbered `left_NNN.png`/`right_NNN.png` pair -- the capture
     half of stereo calibration (docs/relation_deploy_plan.md §9 task 6b;
@@ -459,6 +465,12 @@ def stereo_capture(host: str = "192.168.123.164", out_dir: str = "calib_images",
     GUARANTEED to be the same physical moment, never at risk of drifting out
     of sync the way two independent `check camera --eye ...` calls could
     (e.g. if the operator moves the board between them without noticing).
+
+    `auto_start_server=True` (default): SSH into `host` and start
+    `image_server.py` there if it isn't already reachable, rather than just
+    failing -- see `remote_image_server.py`'s module docstring. This is the
+    point of this flag existing: run this command repeatedly across a whole
+    capture session without ever manually SSHing in yourself.
     """
     import pathlib
 
@@ -470,7 +482,7 @@ def stereo_capture(host: str = "192.168.123.164", out_dir: str = "calib_images",
     out_path.mkdir(parents=True, exist_ok=True)
     idx = _next_pair_index(out_path)
 
-    cam = HeadCamera(host=host, eye="left")
+    cam = HeadCamera(host=host, eye="left", auto_start_server=auto_start_server)
     cam.connect(timeout=timeout)
     t0 = time.monotonic()
     stereo = cam.read_stereo()

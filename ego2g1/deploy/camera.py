@@ -38,12 +38,22 @@ class HeadCamera:
     """G1 head camera via the unitree_deploy ImageClient (ZMQ from the head board)."""
 
     def __init__(self, *, host: str = DEFAULT_HOST, eye: str = "left",
-                 flip_bgr: bool = True):
+                 flip_bgr: bool = True, auto_start_server: bool = False,
+                 ssh_user: str | None = None, ssh_password: str | None = None):
         if eye not in ("left", "right"):
             raise ValueError(f"eye must be left|right, got {eye}")
         self.host = host
         self.eye = eye
         self.flip_bgr = flip_bgr
+        # If True, connect() SSHes into `host` and starts image_server.py
+        # itself when it isn't already reachable, instead of just raising --
+        # see remote_image_server.py's module docstring for why this can
+        # never fully remove the need for SOME process on the robot board
+        # (the camera is wired to ITS usb bus, not the deploy PC's), only
+        # remove having to start that process by hand every session.
+        self.auto_start_server = bool(auto_start_server)
+        self._ssh_user = ssh_user
+        self._ssh_password = ssh_password
         self._client = None
         self._lock = threading.Lock()
         self._frame = None
@@ -59,6 +69,21 @@ class HeadCamera:
         from unitree_deploy.robot_devices.cameras.configs import ImageClientCameraConfig
         from unitree_deploy.robot_devices.cameras.imageclient import ImageClientCamera
 
+        if self.auto_start_server:
+            from . import remote_image_server as _remote
+
+            kwargs = {}
+            if self._ssh_user is not None:
+                kwargs["ssh_user"] = self._ssh_user
+            if self._ssh_password is not None:
+                kwargs["ssh_password"] = self._ssh_password
+            was_running = _remote.ensure_running(self.host, **kwargs)
+            if not was_running:
+                # image_server was JUST started -- give it a moment to open
+                # its ZMQ socket and produce a first frame before the normal
+                # wait-loop below (which times out on its own regardless).
+                time.sleep(2.0)
+
         self._client = ImageClientCamera(ImageClientCameraConfig(host_ip=self.host))
         self._client.connect()
 
@@ -71,7 +96,8 @@ class HeadCamera:
                 raise TimeoutError(
                     f"no frames from image_server at {self.host}. Is it running? "
                     "(ssh unitree@%s; conda activate tv; cd ~/image_server; "
-                    "python image_server.py)" % self.host
+                    "python image_server.py) -- or construct HeadCamera(..., "
+                    "auto_start_server=True) to have this done for you." % self.host
                 )
             time.sleep(0.05)
 

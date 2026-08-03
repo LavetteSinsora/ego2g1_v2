@@ -54,6 +54,7 @@ deploy = [
     "tyro",
     "openpi-client",
     "pyyaml",   # deploy/perception/task_config.py's operator-facing task YAML
+    "paramiko", # deploy/remote_image_server.py's SSH auto-start (no image_server, no capture)
 ]
 teleop = [
     # televuer is vendored from xr_teleoperate/teleop/televuer (212 KB — the
