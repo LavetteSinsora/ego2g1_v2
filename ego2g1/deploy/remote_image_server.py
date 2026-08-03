@@ -68,9 +68,33 @@ def _run(client, command: str) -> str:
     return stdout.read().decode().strip()
 
 
+# Matches every known way this thing gets launched: the plain script
+# (`python image_server.py`, contains "image_server.py" literally), the
+# package-module form `_launch_command` uses for a proper package
+# (`python -m teleimager.image_server` -- no ".py" anywhere, but
+# "image_server" is still a substring), and the installed console-script
+# entry point (`teleimager-server`, a hyphenated name that contains
+# NEITHER of the other two substrings at all).
+#
+# Found the hard way on real hardware (2026-08-03): the ORIGINAL pattern
+# here was the literal string "image_server.py" -- which does not match
+# "python -m teleimager.image_server" at all. That meant a call to
+# ensure_running() that successfully started the server via the module
+# form still concluded (wrongly) that the launch had failed or timed out,
+# since is_running() couldn't see it -- leaving that process alive and
+# bound to its ZMQ port forever, invisible to every later check. Every
+# subsequent launch attempt (automated or by hand, any invocation style)
+# then failed with `zmq.error.ZMQError: Address already in use`, with no
+# indication that the real problem was an ORPHANED earlier process, not
+# a config or hardware issue. If you're reading this after hitting that
+# error again: `pgrep -fa 'image_server|teleimager-server'` to find it,
+# `pkill -f 'image_server|teleimager-server'` to clear it, before retrying.
+_PROCESS_PATTERN = "image_server|teleimager-server"
+
+
 def is_running(client) -> bool:
-    """True if some image_server.py process is already alive on the robot."""
-    return bool(_run(client, "pgrep -f image_server.py"))
+    """True if any known invocation of the image server is already alive."""
+    return bool(_run(client, f"pgrep -f '{_PROCESS_PATTERN}'"))
 
 
 def _find_first_existing_path(client, candidate_paths) -> str | None:
@@ -78,6 +102,42 @@ def _find_first_existing_path(client, candidate_paths) -> str | None:
         if _run(client, f"test -f {path}/image_server.py && echo FOUND") == "FOUND":
             return path
     return None
+
+
+def _launch_command(client, path: str, conda_env: str) -> str:
+    """The correct invocation for `{path}/image_server.py` -- NOT always a
+    plain `cd {path} && python image_server.py`.
+
+    Found the hard way (2026-08-03): the xr_teleoperate-style install
+    (`.../teleimager/src/teleimager/image_server.py`) uses a RELATIVE import
+    (`from .image_client import ...`) -- it is a MODULE inside the
+    `teleimager` PACKAGE, not a standalone script, and running it directly
+    strips that package context (`ImportError: attempted relative import
+    with no known parent package`, straight from
+    `/tmp/image_server_autostart.log` on the robot). The fix is to run it AS
+    a module (`python -m teleimager.image_server`) from `path`'s PARENT
+    directory, which is exactly what makes a relative import resolve.
+
+    Detected via `__init__.py`'s presence in `path` (a real package marker),
+    not assumed from directory naming alone -- a candidate without one
+    (e.g. `unitree_lerobot`'s own `image_server` folder, a different
+    codebase with no evidence of the same issue) keeps the plain
+    direct-script invocation.
+    """
+    is_package = _run(client, f"test -f {path}/__init__.py && echo YES") == "YES"
+    if is_package:
+        parent, pkg_name = path.rsplit("/", 1)
+        run = f"python -m {pkg_name}.image_server"
+        cwd = parent
+    else:
+        run = "python image_server.py"
+        cwd = path
+    # nohup + disown + redirect: survives this SSH connection closing, just
+    # like a human leaving a terminal open achieves, without needing one.
+    return (
+        f"conda activate {conda_env} && cd {cwd} && "
+        f"nohup {run} > /tmp/image_server_autostart.log 2>&1 < /dev/null & disown"
+    )
 
 
 def ensure_running(
@@ -124,15 +184,7 @@ def ensure_running(
 
         logger.info("starting image_server.py at %s on %s (conda env %r)",
                     path, host, conda_env)
-        # nohup + disown + redirect: survives this SSH connection closing,
-        # exactly what a human leaving a terminal open achieves, just
-        # without needing the human or the terminal.
-        _run(
-            client,
-            f"conda activate {conda_env} && cd {path} && "
-            "nohup python image_server.py "
-            "> /tmp/image_server_autostart.log 2>&1 < /dev/null & disown",
-        )
+        _run(client, _launch_command(client, path, conda_env))
 
         t0 = time.monotonic()
         while time.monotonic() - t0 < start_timeout:

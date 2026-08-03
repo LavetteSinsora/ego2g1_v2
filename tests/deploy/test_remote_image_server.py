@@ -12,6 +12,13 @@ import pytest
 
 from ego2g1.deploy import remote_image_server as ris
 
+# Derived from the module's own _PROCESS_PATTERN (not re-typed by hand) so
+# these tests can't silently drift from is_running()'s actual command --
+# that exact drift (a hardcoded "image_server.py" pattern that didn't match
+# the module-invocation launch style) is what caused the real orphaned-
+# process incident this file's TestLaunchCommand class exists to prevent.
+_IS_RUNNING_CMD = f"bash -ic {f'pgrep -f {ris._PROCESS_PATTERN!r}'!r}"
+
 
 class _FakeSSHClient:
     """Records every command run against it; `responses` maps an exact
@@ -42,7 +49,7 @@ def _patch_connect(monkeypatch, fake_client):
 
 class TestAlreadyRunning:
     def test_skips_search_and_launch_when_already_running(self, monkeypatch):
-        fake = _FakeSSHClient({"bash -ic 'pgrep -f image_server.py'": "12345"})
+        fake = _FakeSSHClient({_IS_RUNNING_CMD: "12345"})
         _patch_connect(monkeypatch, fake)
 
         was_running = ris.ensure_running("robot-host")
@@ -57,9 +64,11 @@ class TestLaunching:
     def test_finds_first_existing_candidate_and_launches_it(self, monkeypatch):
         path0, path1 = ris.DEFAULT_CANDIDATE_PATHS[0], ris.DEFAULT_CANDIDATE_PATHS[1]
         responses = {
-            "bash -ic 'pgrep -f image_server.py'": "",              # not running (checked twice: before + after launch)
+            _IS_RUNNING_CMD: "",              # not running (checked twice: before + after launch)
             f"bash -ic 'test -f {path0}/image_server.py && echo FOUND'": "",  # first candidate: absent
             f"bash -ic 'test -f {path1}/image_server.py && echo FOUND'": "FOUND",  # second: present
+            # path1 has no __init__.py registered -> "" -> plain-script launch,
+            # exactly what this test's own assertions below expect
         }
         fake = _FakeSSHClient(responses)
         # after the launch command runs, is_running must report success
@@ -67,7 +76,7 @@ class TestLaunching:
         original_exec = fake.exec_command
 
         def exec_with_state(command):
-            if command == "bash -ic 'pgrep -f image_server.py'":
+            if command == _IS_RUNNING_CMD:
                 call_count["n"] += 1
                 if call_count["n"] > 1:  # first call (pre-launch) already consumed
                     stdin, stdout, stderr = original_exec(command)
@@ -89,9 +98,75 @@ class TestLaunching:
         assert f"conda activate {ris.DEFAULT_CONDA_ENV}" in launch_cmds[0]
 
 
+class TestIsRunningMatchesEveryInvocationStyle:
+    """The actual incident (2026-08-03): is_running()'s pattern was the
+    literal string "image_server.py", which does not match `python -m
+    teleimager.image_server` (module form) or `teleimager-server` (the
+    installed console-script entry point) -- so a server started via
+    either of those was invisible to later checks, orphaned itself on the
+    ZMQ port, and every subsequent launch attempt (any style) failed with
+    `Address already in use` with no indication an earlier process was
+    the real cause. Each of these must be recognized."""
+
+    @pytest.mark.parametrize("process_cmdline", [
+        "python image_server.py",
+        "python -m teleimager.image_server",
+        "/home/unitree/miniconda3/envs/tv/bin/teleimager-server",
+    ])
+    def test_recognizes_every_known_invocation_style(self, monkeypatch, process_cmdline):
+        fake = _FakeSSHClient({_IS_RUNNING_CMD: "12345"})
+        _patch_connect(monkeypatch, fake)
+        # sanity: the fixture's registered response simulates pgrep having
+        # matched `process_cmdline`; the real regression is in the PATTERN
+        # is_running() sends, not in this fake's bookkeeping -- assert the
+        # pattern itself would match each style, directly:
+        import re
+        assert re.search(ris._PROCESS_PATTERN, process_cmdline), (
+            f"_PROCESS_PATTERN {ris._PROCESS_PATTERN!r} does not match "
+            f"a real {process_cmdline!r} process line -- this is exactly "
+            "the bug that orphaned a process on real hardware"
+        )
+
+        was_running = ris.ensure_running("robot-host")
+        assert was_running is True
+
+
+class TestLaunchCommand:
+    """Found the hard way on real hardware (2026-08-03): a plain `cd {path}
+    && python image_server.py` breaks when image_server.py is a MODULE
+    inside a package using relative imports (`from .image_client import
+    ...`) -- `ImportError: attempted relative import with no known parent
+    package`. The fix must be detected per-path (via __init__.py's
+    presence), not assumed."""
+
+    def test_runs_as_a_module_when_path_is_a_package(self, monkeypatch):
+        path = "/home/unitree/unitree_eai_environment/service/teleimager/src/teleimager"
+        fake = _FakeSSHClient({
+            f"bash -ic 'test -f {path}/__init__.py && echo YES'": "YES",
+        })
+
+        cmd = ris._launch_command(fake, path, "tv")
+
+        assert "cd /home/unitree/unitree_eai_environment/service/teleimager/src &&" in cmd
+        assert "python -m teleimager.image_server" in cmd
+        assert "python image_server.py" not in cmd  # must NOT use the plain form
+        assert "conda activate tv" in cmd
+        assert "disown" in cmd
+
+    def test_runs_as_a_plain_script_when_path_has_no_init_py(self, monkeypatch):
+        path = "/unitree/module/unitree_eai/unitree_lerobot/unitree_lerobot/eval_robot/image_server"
+        fake = _FakeSSHClient({})  # no __init__.py response registered -> "" -> not a package
+
+        cmd = ris._launch_command(fake, path, "tv")
+
+        assert f"cd {path} &&" in cmd
+        assert "python image_server.py" in cmd
+        assert " -m " not in cmd
+
+
 class TestErrors:
     def test_raises_clearly_when_no_candidate_path_exists(self, monkeypatch):
-        fake = _FakeSSHClient({"bash -ic 'pgrep -f image_server.py'": ""})
+        fake = _FakeSSHClient({_IS_RUNNING_CMD: ""})
         _patch_connect(monkeypatch, fake)
 
         with pytest.raises(ris.RemoteImageServerError, match="not found"):
@@ -100,7 +175,7 @@ class TestErrors:
     def test_raises_clearly_when_process_never_appears_after_launch(self, monkeypatch):
         path0 = ris.DEFAULT_CANDIDATE_PATHS[0]
         fake = _FakeSSHClient({
-            "bash -ic 'pgrep -f image_server.py'": "",  # never comes up, ever
+            _IS_RUNNING_CMD: "",  # never comes up, ever
             f"bash -ic 'test -f {path0}/image_server.py && echo FOUND'": "FOUND",
         })
         _patch_connect(monkeypatch, fake)
