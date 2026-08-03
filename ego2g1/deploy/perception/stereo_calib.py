@@ -268,7 +268,282 @@ def _cli_calibrate(
     print(f"saved -> {out_npz}  (SUSPECT, see above)" if suspect else f"saved -> {out_npz}")
 
 
+
+# --------------------------------------------------------------------------
+# ChArUco boards (checkerboard + embedded ArUco markers)
+# --------------------------------------------------------------------------
+#
+# A ChArUco board is strictly more robust than a plain checkerboard for this
+# use case: every marker carries a unique ID, so the board is identifiable
+# (and a subset of it usable) even when partially out of frame, tilted
+# sharply, or occluded -- none of which a plain checkerboard tolerates
+# (findChessboardCorners needs the WHOLE inner-corner grid visible and
+# undistorted enough to parse as one shape). The tradeoff: you must know
+# which of OpenCV's many predefined ArUco dictionaries the board was
+# generated with, or detection finds nothing at all, silently, with no
+# partial credit. `detect_aruco_dictionary` below removes that requirement
+# by testing every common dictionary against your own images and picking
+# whichever one actually finds markers, rather than asking you to know or
+# guess it upfront.
+
+# A conservative, common-dictionary shortlist (4x4 through 7x7, all sizes,
+# plus AprilTag families since some ChArUco generators expose them too) --
+# not exhaustive of every dictionary cv2.aruco defines, but covers the
+# overwhelming majority of what online ChArUco-board generators actually
+# default to.
+_ARUCO_DICT_CANDIDATES = [
+    name for name in dir(__import__("cv2").aruco) if name.startswith("DICT_")
+]
+
+
+def detect_aruco_dictionary(images, *, min_markers: int = 4) -> str:
+    """Try every common predefined ArUco dictionary against `images` (a few
+    representative frames is enough -- this does not need every capture),
+    return the NAME (e.g. `"DICT_5X5_100"`) of whichever one detects the
+    most total markers across them.
+
+    Why this exists at all: guessing the wrong dictionary doesn't produce a
+    noisy or partial result, it produces ZERO detections, indistinguishable
+    from "no board in the frame" -- there's no way to tell the two apart
+    just from a failed detection. This function replaces having to
+    know/guess the dictionary with an actual measurement.
+
+    Raises ValueError if NO candidate dictionary finds at least
+    `min_markers` markers in total across all of `images` -- at that point
+    the problem probably isn't the dictionary (an unusual/custom dictionary
+    is possible but uncommon), and it's worth checking the images themselves
+    (in-frame? in focus? adequate lighting?) before trying more dictionaries.
+    """
+    import cv2
+
+    best_name, best_count = None, 0
+    for name in _ARUCO_DICT_CANDIDATES:
+        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, name))
+        detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+        total = 0
+        for img in images:
+            img = np.asarray(img)
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+            gray = np.ascontiguousarray(gray, dtype=np.uint8)
+            _corners, ids, _rejected = detector.detectMarkers(gray)
+            total += 0 if ids is None else len(ids)
+        if total > best_count:
+            best_name, best_count = name, total
+
+    if best_name is None or best_count < min_markers:
+        raise ValueError(
+            f"no ArUco dictionary (tried {len(_ARUCO_DICT_CANDIDATES)}: "
+            f"{_ARUCO_DICT_CANDIDATES[0]}..{_ARUCO_DICT_CANDIDATES[-1]}) found at "
+            f"least {min_markers} markers across {len(images)} image(s) (best: "
+            f"{best_name!r} with {best_count}). This usually means the board "
+            "isn't clearly in frame/focus/lit in these particular images, not "
+            "that the dictionary is unusual -- check the images themselves first."
+        )
+    return best_name
+
+
+def calibrate_from_charuco_image_pairs(
+    pairs,
+    squares_size: tuple[int, int],
+    square_size_m: float,
+    marker_size_m: float,
+    *,
+    aruco_dict_name: str | None = None,
+    criteria=None,
+) -> tuple[StereoCalibration, CalibrationReport]:
+    """Solve a `StereoCalibration` from N ChArUco board image pairs.
+
+    pairs:            sequence of (img_left, img_right), same convention as
+                       `calibrate_from_image_pairs`.
+    squares_size:      (squares_x, squares_y) -- the FULL square count per
+                       side (unlike the plain-checkerboard path, which wants
+                       INNER CORNER count -- a ChArUco board's own corner
+                       count is squares-1 per side too, but `cv2.aruco
+                       .CharucoBoard` is constructed from the square count,
+                       so this function takes that directly to match its
+                       constructor and avoid an off-by-one translation step).
+    square_size_m:     edge length of one checker square, metres.
+    marker_size_m:     edge length of one ArUco marker (the marker sits
+                       INSIDE a square with some border, so this is smaller
+                       than square_size_m -- typically ~0.6-0.8x it, but
+                       measure your actual board rather than assume).
+    aruco_dict_name:   e.g. "DICT_5X5_100". None -> auto-detect via
+                       `detect_aruco_dictionary` against `pairs`' left images
+                       (prints which one it picked either way).
+
+    Per-pair, only marker IDs detected in BOTH eyes are used for the stereo
+    solve (a ChArUco board's whole point is that partial views are fine, but
+    stereoCalibrate needs the same physical points in both images of one
+    pair -- an ID only one eye saw contributes nothing to that pair).
+    """
+    import cv2
+
+    if len(pairs) == 0:
+        raise ValueError("need at least one image pair")
+    if criteria is None:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5)
+
+    if aruco_dict_name is None:
+        sample = [p[0] for p in pairs[: min(5, len(pairs))]]
+        aruco_dict_name = detect_aruco_dictionary(sample)
+        print(f"auto-detected ArUco dictionary: {aruco_dict_name}")
+
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, aruco_dict_name))
+    board = cv2.aruco.CharucoBoard(squares_size, square_size_m, marker_size_m, dictionary)
+    all_corners_3d = board.getChessboardCorners()  # (n_corners_total, 3), board frame
+    detector = cv2.aruco.CharucoDetector(board)
+
+    def _detect(gray):
+        charuco_corners, charuco_ids, _marker_corners, _marker_ids = detector.detectBoard(gray)
+        if charuco_ids is None or len(charuco_ids) == 0:
+            return {}
+        return {
+            int(cid[0]): corner[0]
+            for cid, corner in zip(charuco_ids, charuco_corners)
+        }
+
+    obj_points, img_points_l, img_points_r = [], [], []
+    image_size = None
+    failed_indices: list[int] = []
+
+    for i, (left, right) in enumerate(pairs):
+        left = np.asarray(left)
+        right = np.asarray(right)
+        if left.shape[:2] != right.shape[:2]:
+            raise ValueError(
+                f"pair {i}: left/right image sizes differ, "
+                f"{left.shape[:2]} vs {right.shape[:2]}"
+            )
+        size = (int(left.shape[1]), int(left.shape[0]))
+        if image_size is None:
+            image_size = size
+        elif size != image_size:
+            raise ValueError(
+                f"pair {i}: image size {size} does not match earlier pair(s) {image_size}"
+            )
+
+        gray_l = cv2.cvtColor(left, cv2.COLOR_RGB2GRAY) if left.ndim == 3 else left
+        gray_r = cv2.cvtColor(right, cv2.COLOR_RGB2GRAY) if right.ndim == 3 else right
+        gray_l = np.ascontiguousarray(gray_l, dtype=np.uint8)
+        gray_r = np.ascontiguousarray(gray_r, dtype=np.uint8)
+
+        found_l = _detect(gray_l)
+        found_r = _detect(gray_r)
+        common_ids = sorted(set(found_l) & set(found_r))
+        if len(common_ids) < 4:  # cv2.calibrateCamera's own practical minimum per view
+            failed_indices.append(i)
+            continue
+
+        obj_points.append(all_corners_3d[common_ids].astype(np.float32))
+        img_points_l.append(np.asarray([found_l[cid] for cid in common_ids], dtype=np.float32))
+        img_points_r.append(np.asarray([found_r[cid] for cid in common_ids], dtype=np.float32))
+
+    n_found = len(obj_points)
+    if n_found == 0:
+        raise ValueError(
+            f"no pair of the {len(pairs)} given had >= 4 matching ChArUco corner "
+            "IDs visible in BOTH eyes -- check the board is in frame/focus in "
+            "both cameras, and that aruco_dict_name is correct if you set it "
+            "explicitly (leave it as None to auto-detect)."
+        )
+    if n_found < MIN_RECOMMENDED_VIEWS:
+        print(
+            f"WARNING: only {n_found}/{len(pairs)} pair(s) had enough matching "
+            f"corners (failed: {failed_indices}) -- {MIN_RECOMMENDED_VIEWS}+ "
+            "well-varied views are recommended; treat this as provisional."
+        )
+
+    rms_l, K_l, dist_l, _, _ = cv2.calibrateCamera(obj_points, img_points_l, image_size, None, None)
+    rms_r, K_r, dist_r, _, _ = cv2.calibrateCamera(obj_points, img_points_r, image_size, None, None)
+
+    rms_stereo, K_l, dist_l, K_r, dist_r, R, T, _, _ = cv2.stereoCalibrate(
+        obj_points, img_points_l, img_points_r,
+        K_l, dist_l, K_r, dist_r, image_size,
+        criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC,
+    )
+
+    calib = StereoCalibration(
+        K_left=K_l, K_right=K_r,
+        dist_left=dist_l.flatten(), dist_right=dist_r.flatten(),
+        R=R, T=T.flatten(), image_size=image_size,
+    )
+    report = CalibrationReport(
+        n_given=len(pairs), n_found=n_found, failed_indices=tuple(failed_indices),
+        rms_left_px=float(rms_l), rms_right_px=float(rms_r), rms_stereo_px=float(rms_stereo),
+    )
+    return calib, report
+
+
+def _cli_calibrate_charuco(
+    image_dir: str,
+    squares_x: int,
+    squares_y: int,
+    square_size_m: float,
+    marker_size_m: float,
+    aruco_dict: str = "",
+    out_npz: str = "stereo_calib.npz",
+    left_glob: str = "left_*.png",
+    right_glob: str = "right_*.png",
+) -> None:
+    """CLI: calibrate from left/right ChArUco-board image pairs on disk.
+
+    `aruco_dict`: leave empty to auto-detect (recommended, and printed either
+    way so you can hardcode it next time to skip the detection pass).
+    """
+    import cv2  # lazy
+
+    left_paths = sorted(glob.glob(os.path.join(image_dir, left_glob)))
+    right_paths = sorted(glob.glob(os.path.join(image_dir, right_glob)))
+    if len(left_paths) != len(right_paths):
+        raise ValueError(
+            f"found {len(left_paths)} left image(s) ({left_glob!r}) but "
+            f"{len(right_paths)} right image(s) ({right_glob!r}) in "
+            f"{image_dir!r} -- capture is paired, counts must match"
+        )
+    if not left_paths:
+        raise ValueError(f"no images matching {left_glob!r}/{right_glob!r} in {image_dir!r}")
+
+    pairs = []
+    for lp, rp in zip(left_paths, right_paths):
+        left = cv2.cvtColor(cv2.imread(lp), cv2.COLOR_BGR2RGB)
+        right = cv2.cvtColor(cv2.imread(rp), cv2.COLOR_BGR2RGB)
+        pairs.append((left, right))
+
+    calib, report = calibrate_from_charuco_image_pairs(
+        pairs, (squares_x, squares_y), square_size_m, marker_size_m,
+        aruco_dict_name=(aruco_dict or None),
+    )
+    calib.save(out_npz)
+
+    print(f"board found in {report.n_found}/{report.n_given} pair(s)")
+    if report.failed_indices:
+        failed_names = [os.path.basename(left_paths[i]) for i in report.failed_indices]
+        print(f"  NOT found in: {failed_names}")
+    print(f"reprojection error (px, lower is better -- <0.5 good, >1.0 suspect): "
+          f"left={report.rms_left_px:.3f} right={report.rms_right_px:.3f} "
+          f"stereo={report.rms_stereo_px:.3f}")
+    print(f"baseline: {calib.baseline_m() * 1000:.1f} mm (datasheet nominal: 60 mm)")
+    print(f"K_left:\n{calib.K_left}")
+    print(f"K_right:\n{calib.K_right}")
+
+    fx_l, fy_l = calib.K_left[0, 0], calib.K_left[1, 1]
+    suspect = (
+        report.n_found < MIN_RECOMMENDED_VIEWS
+        or report.rms_stereo_px > 1.0
+        or abs(fx_l / fy_l - 1.0) > 0.2
+    )
+    if suspect:
+        print(
+            "\nSUSPECT CALIBRATION -- do not trust this before investigating. "
+            f"fx/fy ratio (left) = {fx_l / fy_l:.2f} (should be close to 1.0)."
+        )
+    print(f"saved -> {out_npz}  (SUSPECT, see above)" if suspect else f"saved -> {out_npz}")
+
+
 if __name__ == "__main__":
     import tyro
 
-    tyro.cli(_cli_calibrate)
+    tyro.extras.subcommand_cli_from_dict({
+        "checkerboard": _cli_calibrate,
+        "charuco": _cli_calibrate_charuco,
+    })
