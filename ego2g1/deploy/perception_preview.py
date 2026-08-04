@@ -191,6 +191,19 @@ def main() -> None:
                        "already running is never interrupted -- see module "
                        "docstring)")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--device", default=None,
+                  help="torch device for the detector, e.g. 'cuda'/'cpu'. "
+                       "Default: auto (GroundingDinoSam2Detector picks cuda "
+                       "if available) -- pass --device cpu to force CPU, "
+                       "e.g. to leave the GPU free for a concurrent serve "
+                       "process.")
+    p.add_argument("--box-threshold", type=float, default=0.3,
+                  help="GroundingDINO confidence floor to keep a box (module "
+                       "default 0.3) -- lower this if a real, visible object "
+                       "never crosses threshold (weak lighting/angle/prompt "
+                       "wording); the tool logs 'never been detected' warnings "
+                       "forever below threshold, which is not a bug, just an "
+                       "honest report of a miss every tick.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, force=True,
@@ -212,11 +225,12 @@ def main() -> None:
         cam = HeadCamera(host=args.camera_host, eye=args.eye)
     cam.connect()
 
-    logger.info("loading GroundingDINO+SAM2 on CPU -- first run downloads "
-               "weights from HuggingFace, this can take a while...")
+    logger.info("loading GroundingDINO+SAM2 (device=%s) -- first run downloads "
+               "weights from HuggingFace, this can take a while...",
+               args.device or "auto")
     from ego2g1.deploy.perception.detector import GroundingDinoSam2Detector
-    detector = GroundingDinoSam2Detector(device="cpu")
-    logger.info("detector loaded.")
+    detector = GroundingDinoSam2Detector(device=args.device, box_threshold=args.box_threshold)
+    logger.info("detector loaded on %s.", detector.device)
 
     from ego2g1.deploy.perception.relation_perception import RelationPerception
     perception = RelationPerception(

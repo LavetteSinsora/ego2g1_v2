@@ -52,6 +52,16 @@
 #     still breaks the compiled extension's baked-in rpath — see that same
 #     doc section for why, and prefer building on the final machine at its
 #     final path over copying a pre-built tree.
+#   * HuggingFace access: GroundingDinoSam2Detector pulls grounding-dino-tiny
+#     + the SAM2 checkpoint from huggingface.co at construction time
+#     (perception/detector.py) — if that connection is as unreliable as
+#     GitHub was, HF_ENDPOINT below repoints every huggingface_hub/transformers
+#     download at the hf-mirror.com mirror (the standard workaround for
+#     exactly this). HF_HOME keeps the downloaded weights repo-local
+#     (.hf_cache/, NOT $HOME) for the same self-containment reason as
+#     .cyclonedds/ above. If the mirror is ever the one that's down instead,
+#     override with `HF_ENDPOINT=https://huggingface.co source envs/4090.sh`
+#     (an already-exported value here always wins, see the `:-` below).
 #   * Still-open prerequisites this profile does NOT solve for you (see the
 #     relation_eef checklist): the task-config YAML itself (copy
 #     ego2g1/deploy/perception/task_config.example.yaml to
@@ -121,7 +131,12 @@ fi
 [ -f "$_EGO2G1_ROOT/camera_calib.npz" ] && \
     export EGO2G1_CAMERA_EXTRINSIC="$_EGO2G1_ROOT/camera_calib.npz"
 
+# --- HuggingFace: mirror + repo-local cache (relation_eef's GroundingDINO/SAM2) ---
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export HF_HOME="${HF_HOME:-$_EGO2G1_ROOT/.hf_cache}"
+
 echo "4090: venv=$_EGO2G1_ROOT/.venv  iface=$EGO2G1_IFACE  domain=$EGO2G1_DDS_DOMAIN  camera=$EGO2G1_CAMERA_HOST"
+echo "4090: hf_endpoint=$HF_ENDPOINT  hf_home=$HF_HOME"
 echo "4090: cyclonedds=${CYCLONEDDS_HOME:-<none — build into .cyclonedds/ per docs/deps-deploy.md if uv sync fails on cyclonedds>}"
 echo "4090: relation_eef defaults — task-config=${EGO2G1_TASK_CONFIG:-<none, add ego2g1/deploy/perception/task_config.yaml>}"
 echo "4090:   stereo-calib=${EGO2G1_STEREO_CALIB:-<missing>}  camera-extrinsic=${EGO2G1_CAMERA_EXTRINSIC:-<missing>}"

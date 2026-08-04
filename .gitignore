@@ -9,6 +9,8 @@ __pycache__/
 .pytest_cache/
 # cyclonedds C library build (repo-local, see docs/deps-deploy.md)
 .cyclonedds/
+# HuggingFace cache (repo-local, see envs/4090.sh) — GroundingDINO/SAM2 weights
+.hf_cache/
 # mac
 .DS_Store
 MUJOCO_LOG.TXT
