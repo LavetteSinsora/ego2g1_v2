@@ -38,6 +38,20 @@
 #     Only exported when the file actually exists, so a fresh checkout with
 #     no task config yet still gets runner.py's normal fail-loud "missing
 #     --task-config" error instead of pointing at a dangling path.
+#   * CycloneDDS: `cyclonedds==0.10.2` normally gets a manylinux wheel on
+#     Linux (unlike macOS, which has none at all — docs/deps-deploy.md), but
+#     an unsupported Python minor version/libc/offline sync still falls back
+#     to a source build that needs the C library + CYCLONEDDS_HOME, same as
+#     the Mac. If `uv sync --group deploy`/`--group perception` fails on this
+#     box, build it once into `.cyclonedds/` AT THE REPO ROOT, not `$HOME`
+#     (docs/deps-deploy.md's "CycloneDDS on Linux" section has the exact
+#     commands) — this machine is meant to be copied/USB-transplanted whole,
+#     and a dependency living under `$HOME` doesn't travel with the checkout.
+#     This profile picks up the result automatically below. Building at one
+#     absolute path and then copying the tree to a DIFFERENT absolute path
+#     still breaks the compiled extension's baked-in rpath — see that same
+#     doc section for why, and prefer building on the final machine at its
+#     final path over copying a pre-built tree.
 #   * Still-open prerequisites this profile does NOT solve for you (see the
 #     relation_eef checklist): the task-config YAML itself (copy
 #     ego2g1/deploy/perception/task_config.example.yaml to
@@ -83,6 +97,19 @@ if [ -z "${EGO2G1_IFACE:-}" ]; then
 fi
 export EGO2G1_IFACE
 
+# CycloneDDS C library — repo-local (.cyclonedds/, NOT $HOME) so the whole
+# checkout stays self-contained/copyable. Only set if it was actually built
+# here (see the header comment / docs/deps-deploy.md); needed at `uv sync`
+# build time, harmless to export otherwise since a wheel install never reads
+# it. LD_LIBRARY_PATH is a defensive fallback ONLY — if this tree was built at
+# a different absolute path and then copied here, it may recover the compiled
+# extension's rpath (DT_RUNPATH honors LD_LIBRARY_PATH first), but the
+# supported path is building fresh at this exact location (see the doc).
+if [ -d "$_EGO2G1_ROOT/.cyclonedds/install" ]; then
+    export CYCLONEDDS_HOME="$_EGO2G1_ROOT/.cyclonedds/install"
+    export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}"
+fi
+
 # --- relation_eef defaults: runner.py's Args reads these three verbatim ----
 # (task_config/stereo_calib/camera_extrinsic default_factory= os.environ.get(...),
 # ego2g1/deploy/runner.py). Only set when the file exists; joint/relative_eef
@@ -95,6 +122,7 @@ export EGO2G1_IFACE
     export EGO2G1_CAMERA_EXTRINSIC="$_EGO2G1_ROOT/camera_calib.npz"
 
 echo "4090: venv=$_EGO2G1_ROOT/.venv  iface=$EGO2G1_IFACE  domain=$EGO2G1_DDS_DOMAIN  camera=$EGO2G1_CAMERA_HOST"
+echo "4090: cyclonedds=${CYCLONEDDS_HOME:-<none — build into .cyclonedds/ per docs/deps-deploy.md if uv sync fails on cyclonedds>}"
 echo "4090: relation_eef defaults — task-config=${EGO2G1_TASK_CONFIG:-<none, add ego2g1/deploy/perception/task_config.yaml>}"
 echo "4090:   stereo-calib=${EGO2G1_STEREO_CALIB:-<missing>}  camera-extrinsic=${EGO2G1_CAMERA_EXTRINSIC:-<missing>}"
 echo "4090: jax preallocate=off mem_fraction=$XLA_PYTHON_CLIENT_MEM_FRACTION (leaving room for torch/SAM2 on the same card)"

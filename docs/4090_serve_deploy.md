@@ -19,13 +19,17 @@ so `runner.py` doesn't need `--task-config`/`--stereo-calib`/`--camera-extrinsic
 repeated on every invocation (an explicit flag still overrides).
 
 Prerequisites before any of this runs — see `docs/deploy.md` for the general
-deploy story and the prior conversation's `relation_eef` checklist for the
-full detail:
+deploy story:
 
 - checkpoint rsync'd from the PPU under `checkpoints/ego2g1_pi05/<exp>/best/`
   (trained with `EgoRelationTrainConfig` — check `ego2g1_stamp.json`'s
   `config_class`);
-- `uv sync --group train --group perception` (perception includes `deploy`);
+- `uv sync --group train --group perception` (perception includes `deploy`) —
+  if this fails on `cyclonedds`, run `bash docs/build_cyclonedds.sh` first
+  (builds the C library into repo-local `.cyclonedds/`, not `$HOME`, so this
+  machine stays self-contained/copyable; `envs/4090.sh` picks it up
+  automatically) — see `docs/deps-deploy.md`'s "CycloneDDS on Linux" section
+  for why this happens and what each step in that script does;
 - `ego2g1/deploy/perception/task_config.yaml` authored from
   `task_config.example.yaml`, objects matching the checkpoint positionally;
 - `stereo_calib.npz` / `camera_calib.npz` at the repo root current for
