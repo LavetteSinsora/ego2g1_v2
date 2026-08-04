@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import threading
 import time
 
@@ -572,15 +573,23 @@ class Args:
     # file is ever required for those modes. All three become REQUIRED the
     # moment action_mode resolves to "relation_eef" (main() fails loud,
     # naming exactly which is missing, before touching the robot/camera).
-    task_config: str | None = None     # YAML for perception/task_config.py's
-                                       # DeployTaskConfig (objects, in the
-                                       # checkpoint's fixed order, + hands)
-    stereo_calib: str | None = None    # .npz for perception/depth.py's
-                                       # StereoCalibration.load (head-camera
-                                       # stereo intrinsics/extrinsics)
-    camera_extrinsic: str | None = None   # .npz (key "T_pelvis_camera") from
-                                       # perception/touch_calib.py's
-                                       # solve_camera_extrinsic / _cli_solve
+    # Default from EGO2G1_TASK_CONFIG/EGO2G1_STEREO_CALIB/EGO2G1_CAMERA_EXTRINSIC
+    # (envs/4090.sh exports these) so a relation_eef run on a fixed rig doesn't
+    # need all three repeated on every invocation; an explicit --flag still
+    # overrides. Unset env + no flag -> None, same "REQUIRED the moment
+    # action_mode resolves to relation_eef" failure as before.
+    # YAML for perception/task_config.py's DeployTaskConfig (objects, in the
+    # checkpoint's fixed order, + hands).
+    task_config: str | None = dataclasses.field(
+        default_factory=lambda: os.environ.get("EGO2G1_TASK_CONFIG"))
+    # .npz for perception/depth.py's StereoCalibration.load (head-camera
+    # stereo intrinsics/extrinsics).
+    stereo_calib: str | None = dataclasses.field(
+        default_factory=lambda: os.environ.get("EGO2G1_STEREO_CALIB"))
+    # .npz (key "T_pelvis_camera") from perception/touch_calib.py's
+    # solve_camera_extrinsic / _cli_solve.
+    camera_extrinsic: str | None = dataclasses.field(
+        default_factory=lambda: os.environ.get("EGO2G1_CAMERA_EXTRINSIC"))
     # --- robot ---
     network_interface: str | None = None   # DDS iface; None joins the default domain
     fps: int = 0                       # 0 = the checkpoint's own fps

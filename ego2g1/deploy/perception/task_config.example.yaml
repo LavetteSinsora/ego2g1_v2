@@ -1,0 +1,46 @@
+# Template for `--task-config` (relation_eef mode only).
+#
+# Loaded by ego2g1.deploy.perception.task_config.load_task_config and checked
+# against the connected checkpoint at connect time by
+# validate_against_server_metadata: `objects[i].category` MUST equal the
+# checkpoint's `train_config.objects[i]` VERBATIM, in the SAME order — a
+# mismatch (wrong count, wrong wording, wrong order) is refused loud before
+# the robot moves, never silently fed to the wrong slot.
+#
+# The three objects below are ego2g1.train.config.EgoRelationTrainConfig's own
+# DEFAULT `objects`/`object_prompt_names` (train/config.py) — a real starting
+# point, not an arbitrary placeholder, but you MUST confirm they match the
+# checkpoint you actually rsync'd: read that checkpoint's ego2g1_stamp.json
+# and check `ego2g1_config.objects` there. If your run used different objects
+# (or a different count), replace instance_id/category/detector_prompt below
+# to match — category is the only field validate_against_server_metadata
+# checks; detector_prompt is free text handed to GroundingDINO (end each
+# prompt with " ." — that trailing period is GroundingDINO's own phrase
+# separator convention, not a typo).
+#
+# graspable: false for anything that is a placement target / landmark rather
+# than something either hand should ever be allowed to latch onto (see
+# perception/latch.py — GraspLatch only ever considers `graspable: true`
+# objects as candidates).
+
+objects:
+  - instance_id: obj0
+    category: "black, metal pen holder"
+    detector_prompt: "a black, metal pen holder ."
+    graspable: true
+
+  - instance_id: obj1
+    category: "red cube"
+    detector_prompt: "a red cube ."
+    graspable: true
+
+  - instance_id: obj2
+    category: "yellow cube"
+    detector_prompt: "a yellow cube ."
+    graspable: true
+
+# Which of the robot's two hands are physically in play this session.
+# Deploy-local only — NOT checked against the checkpoint (see
+# task_config.py's module docstring: hands is an operator choice, not
+# something train_config asserts).
+hands: [left, right]

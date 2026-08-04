@@ -29,6 +29,13 @@ Module map (docs/relation_deploy_plan.md §9):
                  §6) from FK/detector correspondence pairs, via this repo's
                  existing `core.hand.retarget._kabsch` fit (§6.2, task 11).
                  Implemented.
+  handeye_calib  solves `T_pelvis_camera` via a gripped AprilTag/ArUco marker
+                 + the classical AX=XB eye-to-hand equation (`cv2
+                 .calibrateHandEye`), instead of touch_calib's object-centroid
+                 Kabsch fit -- trades touch_calib's simplicity for not
+                 depending on detector/depth accuracy at all. See its module
+                 docstring for the full derivation. Implemented; capture
+                 workflow is `check.py`'s `handeye-capture` rung.
   detector       GroundingDINO + SAM2 cascade tier (§5.3, task 8).
                  Implemented, heavy deps behind a lazy-import guard.
   tracker        fast between-detector tracking tier: Kalman + causal

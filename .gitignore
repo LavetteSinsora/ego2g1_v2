@@ -7,6 +7,8 @@ ego2g1/data/work/
 __pycache__/
 *.pyc
 .pytest_cache/
+# cyclonedds C library build (repo-local, see docs/deps-deploy.md)
+.cyclonedds/
 # mac
 .DS_Store
 MUJOCO_LOG.TXT
