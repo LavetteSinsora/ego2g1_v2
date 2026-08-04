@@ -93,7 +93,10 @@ class UnitreeExecutor:
     def connect(self) -> None:
         # macOS has no native unitree CRC -> ~1 ms/LowCmd pure-Python inside
         # the 500 Hz loop (39-50% of the tick budget, measured). Bit-identical
-        # zlib replacement, 187x faster; no-op effect on Linux (native branch).
+        # zlib replacement, 187x faster; on a working Linux install this is a
+        # no-op (native branch still used) -- but if that install is missing
+        # its compiled crc_amd64.so/crc_aarch64.so, this is what keeps
+        # CRC() from crashing at all (see fast_crc.py's module docstring).
         from . import fast_crc
         fast_crc.install()
         # Pre-init the DDS factory on the requested interface BEFORE the
