@@ -41,6 +41,7 @@ import numpy as np
 
 from ...core import layout, se3
 from .. import actions as _actions
+from . import cli as _cli
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +144,18 @@ def solve_from_eef(ep: dict, fps: int, *, ik_iters: int = 40,
     return q
 
 
-@dataclasses.dataclass
-class Args:
+@dataclasses.dataclass(kw_only=True)
+class Args(_cli.RobotArgs, _cli.RunArgs):
     dataset: str
     episode: int = 0
     fps: int = 30
     from_eef: bool = False
+    # 40, not cli.IKArgs' shared 25: --from-eef re-solves OFFLINE, where no
+    # 33 ms tick budget applies, so extra iterations buy tracking accuracy
+    # for free — a deliberate divergence, not default drift
     ik_iters: int = 40
     ik_tol: float = 0.02
-    network_interface: str | None = None
-    max_pos_speed: float | None = None     # soften the interpolator for bring-up
     hands: bool = True
-    dry_run: bool = False                  # stats + mock executor, no robot
-    yes: bool = False                      # skip the confirmation prompt
     max_joint_step: float = 0.15           # session.py's per-tick clamp; a
                                            # legitimate replay never hits it
 

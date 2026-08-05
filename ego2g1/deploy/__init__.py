@@ -28,14 +28,19 @@ no module needs the robot to import):
                  damp-on-interrupt), safety, latency, executor (unitree_deploy
                  wrapper + damp() e-stop + MockExecutor), kinematics, client,
                  fast_crc
-  modes/         one DeployMode object per policy family (joint /
-                 relative_eef / relation_eef) — the observation shape, adapter
-                 wiring, hand bookkeeping, and per-mode telemetry/recorder
-                 extras. Adding a policy family = one file here.
-  actions        the action-mode boundary: policy chunks -> (H, 26) JOINT
-                 chunks (_EEFChunksBase + per-mode decode), model-space guards
-  policy_adapter wraps the policy client so the runner only ever sees joint
-                 chunks (ZH's adapter pattern; carries our RTC prefix contract)
+  modes/         one file per policy family (joint / relative_eef /
+                 relation_eef), each COMPLETE: the DeployMode object (
+                 observation shape, adapter wiring, hand bookkeeping,
+                 per-mode telemetry/recorder extras) plus that family's own
+                 chunk converter and policy adapter. base.py holds the
+                 registry, eef.py the machinery the two EEF modes share.
+                 Adding a policy family = one file here + register().
+  actions        the action-mode BOUNDARY only: the (H, 26) executor row
+                 layout + the model-space sanity guards. The converters
+                 themselves live in modes/ and are re-exported here lazily
+                 under their historical names.
+  policy_adapter make_adapter + lazy re-exports of the per-mode adapters
+                 (which live in modes/); kept as the name callers know
   perception/    the relation_eef cascade: detector / depth / tracker / latch
                  / relation_perception + the calibration solvers
   record/        the recording contract: schema (event kinds + build_meta,
@@ -45,10 +50,12 @@ no module needs the robot to import):
                  shape) + overlay (the perception overlay renderer, fed the
                  recorded `percept` shape), dashboard, replay_dashboard,
                  perception_preview
-  tools/         the bring-up rung ladder (check — walk it in order), the
-                 replay tools (replay_dataset: the hardware A/B; replay_diag;
-                 replay_mujoco; replay_relation_openloop), and the wire
-                 diagnostics (measure_rate, sniff_lowcmd)
+  tools/         the bring-up rung ladder (check/ — one module per rung
+                 family, walk it in order), the replay tools (replay_dataset:
+                 the hardware A/B; replay_diag; replay_mujoco;
+                 replay_relation_openloop), the wire diagnostics
+                 (measure_rate, sniff_lowcmd), and cli.py's shared Args
+                 mixins (one owner per CLI default)
   camera / remote_image_server / gripper_calib / _util   shared leaves
 
 Every documented `python -m ego2g1.deploy.<name>` entrypoint keeps working:

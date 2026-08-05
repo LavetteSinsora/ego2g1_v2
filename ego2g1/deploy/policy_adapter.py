@@ -1,315 +1,57 @@
 """The policy⇄execution boundary: everything downstream sees JOINT chunks.
 
 Pattern from zh_deploy_inference/examples/unitree_inference/policy_adapter.py
-(their EEFPolicyAdapter), rebuilt for ego2g1's model contract: the adapter owns
-the model-facing observation (FK state), the action-mode conversion
-(actions.py), and the RTC prefix translation — so strategies.py and runner.py
-are byte-identical whether the checkpoint speaks joints or anchor-relative EEF.
+(their EEFPolicyAdapter), rebuilt for ego2g1's model contract: the adapter
+owns the model-facing observation (FK state), the action-mode conversion,
+and the RTC prefix translation — so strategies.py and runner.py are
+byte-identical whether the checkpoint speaks joints or anchor-relative EEF.
 
-Runner-side request dict (built by runner._observe):
+The adapter classes live with their modes now (docs/deploy_refactor_plan.md
+§1: one file per policy family — modes/joint.py, modes/relative_eef.py,
+modes/relation_eef.py; the shared reply tail is modes/eef.py's
+`convert_with_diagnostics`). This module re-exports them under their
+historical names, lazily (an eager import would be circular through
+actions.py's row-layout constants), and keeps `make_adapter` as the factory
+callers know.
+
+Runner-side request dict (built by each mode's `build_observation`):
 
     {"arm_q":     (14,) measured arm joints at the observation tick,
      "hand_cmds": {hand: (6,)} LAST COMMANDED hand values (not encoders),
      "image":     (H, W, 3) uint8 RGB or None,
      "prompt":    str,
+     # relation_eef only:
+     "rgb_left"/"rgb_right": the stereo pair, "hand_cmds_last": {hand: float},
      # attached by AsyncStrategy when rtc=True:
      "enable_rtc": bool, "inference_delay": int ticks,
      "prev_action_chunk": (K, 26) JOINT rows — the leftover plan}
 
 Adapter reply: {"actions": (H, 26) joint rows, ...server extras}.
-
-RTC prefix translation (relative_eef): the strategy's leftover plan is joint
-rows, but the server wants anchor-relative vec9 deltas against the NEW anchor.
-FK gives the absolute flange pose of every leftover row; delta = anchor_new⁻¹ @
-pose. This is `core.se3.reanchor_chunk` composed through FK — one code path,
-no second delta convention. Hand dims pass through (absolute in both spaces).
 """
 
 from __future__ import annotations
 
-import numpy as np
-
-from ..core import layout, relation_layout, se3
-from . import actions as _actions
-
-
-def _convert_with_diagnostics(adapter, out: dict, state, arm_q, hand_cmds) -> dict:
-    """The EEF adapters' shared reply tail (was copy-pasted in both): keep the
-    raw model-space chunk + the request state for the recorder — without them
-    a bad served chunk is undiagnosable from the recording — then convert to
-    joint rows and surface the converter's per-slot telemetry."""
-    adapter.last_state = np.asarray(state, dtype=np.float64)
-    adapter.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
-    out["actions"] = adapter._converter.convert(out["actions"], arm_q, hand_cmds)
-    out["slot_errors_m"] = getattr(adapter._converter, "last_slot_errors", None)
-    out["raw_chunk"] = adapter.last_raw_chunk
-    out["request_state"] = adapter.last_state
-    # per-slot flange target positions (pelvis frame) — replay_mujoco.py's
-    # RED "where the policy wanted the hand" marker
-    out["flange_targets"] = getattr(adapter._converter, "last_targets", None)
-    return out
+_MOVED = {
+    "JointPolicyAdapter": ("joint", "JointPolicyAdapter"),
+    "RelativeEEFPolicyAdapter": ("relative_eef", "RelativeEEFPolicyAdapter"),
+    "RelationPolicyAdapter": ("relation_eef", "RelationPolicyAdapter"),
+}
 
 
-class JointPolicyAdapter:
-    """`joint` mode: the model space IS the executor space (ZH-style).
+def __getattr__(name):
+    if name in _MOVED:
+        import importlib
 
-    State up: (26,) [arm14 | handL6 | handR6]. Actions down: (H, 14) or
-    (H, 26), validated and hand-padded by actions.JointChunks. The RTC prefix,
-    when present, passes through unchanged — joint rows are already model
-    space.
-    """
-
-    mode = "joint"
-
-    def __init__(self, client, prompt: str = ""):
-        self._client = client
-        self._converter = _actions.JointChunks()
-        self.prompt = prompt
-        self.action_horizon = int(client.action_horizon)
-        self.fps = int(client.fps)
-
-    def infer(self, request: dict) -> dict:
-        arm_q = np.asarray(request["arm_q"], dtype=np.float64)
-        hand_cmds = request["hand_cmds"]
-        state = np.concatenate(
-            [arm_q] + [np.asarray(hand_cmds[h], dtype=np.float64)
-                       for h in layout.HANDS])
-
-        prev, d, n_prefix = None, 0, None
-        if request.get("enable_rtc") and request.get("prev_action_chunk") is not None:
-            prev_rows = np.asarray(request["prev_action_chunk"], dtype=np.float32)
-            prev = np.zeros((self.action_horizon, prev_rows.shape[1]), np.float32)
-            k = min(len(prev_rows), self.action_horizon)
-            prev[:k] = prev_rows[:k]
-            n_prefix = k
-            d = int(request.get("inference_delay", 0))
-
-        out = self._client.infer(request.get("image"), state, request.get("prompt", self.prompt),
-                                 prev_chunk=prev, d=d, n_prefix=n_prefix)
-        out["actions"] = self._converter.convert(out["actions"], arm_q, hand_cmds)
-        return out
-
-    def reset(self) -> None:
-        self._converter.reset()
-
-
-class RelativeEEFPolicyAdapter:
-    """`relative_eef` mode: current ego2g1 checkpoints.
-
-    Up:   (30,) state = measured-FK flange vec9 per hand + last hand commands.
-    Down: (H, 30) anchor-relative chunk -> actions.RelativeEEFChunks (OneEuroSE3
-          -> DualArmIK posture-tracks-last @ 0.05 -> JointFilter) -> (H, 26).
-
-    `last_tracking_error` (worst IK flange error over the last converted chunk,
-    metres) is surfaced for the runner's watchdog.
-    """
-
-    mode = "relative_eef"
-
-    def __init__(self, client, prompt: str = "", *, converter=None, kin=None,
-                 ik_iters: int = 25, posture_cost: float = 0.05,
-                 collision_min_dist: float = 0.005):
-        self._client = client
-        self.prompt = prompt
-        self.action_horizon = int(client.action_horizon)
-        self.fps = int(client.fps)
-        self._converter = converter or _actions.RelativeEEFChunks(
-            kin, fps=self.fps, ik_iters=ik_iters, posture_cost=posture_cost,
-            collision_min_dist=collision_min_dist)
-        self._kin = self._converter.kin
-
-    @property
-    def last_tracking_error(self) -> float:
-        return self._converter.last_tracking_error
-
-    def infer(self, request: dict) -> dict:
-        arm_q = np.asarray(request["arm_q"], dtype=np.float64)
-        hand_cmds = request["hand_cmds"]
-        state = self._kin.state(arm_q, hand_cmds)
-
-        prev, d, n_prefix = None, 0, None
-        if request.get("enable_rtc") and request.get("prev_action_chunk") is not None:
-            prev, n_prefix = self._reanchor_joint_rows(
-                np.asarray(request["prev_action_chunk"], dtype=np.float64), arm_q)
-            d = int(request.get("inference_delay", 0))
-
-        out = self._client.infer(request.get("image"), state,
-                                 request.get("prompt", self.prompt),
-                                 prev_chunk=prev, d=d, n_prefix=n_prefix)
-        return _convert_with_diagnostics(self, out, state, arm_q, hand_cmds)
-
-    def _reanchor_joint_rows(self, rows, arm_q_new) -> tuple[np.ndarray, int]:
-        """(K, 26) joint rows -> (H, 30) model-space prefix vs the NEW anchor.
-
-        FK every leftover row and difference against the new observation's
-        anchor. Row 0 of the result must be the action for the instant the new
-        chunk's slot 0 executes — the caller (AsyncStrategy) already sliced the
-        leftover, so it is. Zero-padded to H with n_prefix marking the real
-        rows: a zero vec9 decodes to a det-0 matrix, not a pose, and the server
-        must know where to stop (serve/policy.py enforces the same cap).
-        """
-        anchor_new = self._kin.flange_poses(arm_q_new)
-        k = min(len(rows), self.action_horizon)
-        out = np.zeros((self.action_horizon, layout.DIM), dtype=np.float32)
-        for i in range(k):
-            arm, hands = _actions.split_row(rows[i])
-            poses = self._kin.flange_poses(arm)
-            for h in layout.HANDS:
-                delta = se3.se3_inv(anchor_new[h]) @ poses[h]
-                out[i, layout.EEF[h]] = se3.se3_to_vec9(delta)
-                out[i, layout.HAND[h]] = np.clip(hands[h], 0.0, 1.0)
-        return out, k
-
-    def reset(self) -> None:
-        self._converter.reset()
-
-
-class RelationPolicyAdapter:
-    """`relation_eef` mode: `EgoRelationTrainConfig` checkpoints.
-
-    Up:   (56,) relation state, HAND-MAJOR:
-              [left->obj0(9) left->obj1(9) left->obj2(9)
-               right->obj0(9) right->obj1(9) right->obj2(9)
-               grasp_left grasp_right]
-          This is the EXACT layout `ego2g1.train.relation_transforms
-          .RelationPrompt.__call__` expects on `observation/state` (re-read
-          that docstring/body before touching this class) — object order
-          must match the checkpoint's `train_config.objects`, UNSHUFFLED
-          (serving builds `create_relation_data_config(...,
-          shuffle_objects=False)`, docs/relation_deploy_plan.md §4.2).
-    Down: (H, 14) anchor-relative rotvec chunk ->
-          `actions.RelativeEEFRotvecChunks` (OneEuroSE3 -> DualArmIK
-          posture-tracks-last @ 0.05 -> JointFilter) -> (H, 26).
-
-    Two ways to supply the relation state, chosen by whether `perception`
-    (a `ego2g1.deploy.perception.relation_perception.RelationPerception`)
-    is passed to the constructor:
-
-      perception=None (default)   Thin pass-through: the caller must place
-                                   an already-computed (56,) float32 array at
-                                   `request["relation_state"]`. This is what
-                                   every existing test in this codebase uses
-                                   (docs/relation_deploy_plan.md's Phase-1
-                                   validation, before Phase 2's live
-                                   perception existed) and remains supported
-                                   — a mocked/replayed relation state is
-                                   still the right tool for testing the
-                                   action-conversion path in isolation from
-                                   the (much more failure-prone) camera/
-                                   detector stack.
-      perception=<instance>       `infer()` calls `perception.observe(
-                                   request["rgb_left"], request["rgb_right"],
-                                   flange_poses, request["hand_cmds_last"])`
-                                   itself — `flange_poses` comes from this
-                                   adapter's own `Kinematics` (the SAME
-                                   instance the action converter uses, so the
-                                   relation state's hand-frame and the
-                                   action's anchor are the identical FK
-                                   call, never two independently-computed
-                                   flange poses that could drift apart).
-                                   `request["hand_cmds_last"]`: {hand: float
-                                   in [0, 1]}, the last-commanded gripper
-                                   FRACTION (not the old modes' (6,) motor
-                                   vector) — see `RelativeEEFRotvecChunks`'s
-                                   own `frac` convention.
-
-    Either way, the resulting layout must match EXACTLY: hand-major,
-    unshuffled object order (matching the connected checkpoint's
-    `train_config.objects`), grasp binaries at the tail, vec9 =
-    [tx,ty,tz, R[:,0], R[:,1]] per `ego2g1.core.rot6d` — a mismatched layout
-    silently mispairs an object name with the wrong geometry and serves a
-    plausible-looking but wrong policy.
-
-    RTC is NOT supported for this mode (`EgoRelationTrainConfig
-    .rtc_training = False`; the reanchor-prefix math for rotvec deltas +
-    per-slot-quantized (gripper-exempt) actions needs its own design,
-    docs/relation_deploy_plan.md §8) — `.infer` raises rather than silently
-    dropping the prefix if the caller asks for it.
-
-    `last_tracking_error` mirrors `RelativeEEFPolicyAdapter`'s contract:
-    worst IK flange error (metres) over the last converted chunk, for the
-    runner's watchdog.
-    """
-
-    mode = "relation_eef"
-
-    def __init__(self, client, prompt: str = "", *, converter=None, kin=None,
-                 ik_iters: int = 25, posture_cost: float = 0.05,
-                 collision_min_dist: float = 0.005, perception=None):
-        self._client = client
-        self.prompt = prompt
-        self.action_horizon = int(client.action_horizon)
-        self.fps = int(client.fps)
-        self._converter = converter or _actions.RelativeEEFRotvecChunks(
-            kin, fps=self.fps, ik_iters=ik_iters, posture_cost=posture_cost,
-            collision_min_dist=collision_min_dist)
-        self._kin = self._converter.kin
-        # ego2g1.deploy.perception.relation_perception.RelationPerception, or
-        # None for the pass-through contract (see class docstring). Optional
-        # so every existing test that supplies `request["relation_state"]`
-        # directly keeps working unchanged.
-        self._perception = perception
-
-    @property
-    def last_tracking_error(self) -> float:
-        return self._converter.last_tracking_error
-
-    @property
-    def perception(self):
-        """The `RelationPerception` instance backing this adapter, or `None`
-        for the pass-through contract (see class docstring). Surfaced so
-        `runner.py`'s telemetry can pull dashboard-facing state
-        (`last_rgb_left`/`last_detections`/`recent_events()`) that lives on
-        the perception object itself, not in the per-tick `last_percept`
-        dict, without reaching into the private `_perception` attribute."""
-        return self._perception
-
-    @property
-    def closed_pose(self) -> dict:
-        """The converter's per-hand `BRAINCO_CLOSED_POSE`-shaped (6,) array
-        (`ego2g1.deploy.gripper_calib`, possibly overridden at construction).
-        Surfaced so `runner.py` can recover the scalar open/closed fraction
-        from an executed 6-motor command (`gripper_calib.frac_from_command`)
-        for the NEXT tick's `hand_cmds_last`, without reaching into the
-        converter's private internals directly."""
-        return self._converter.closed_pose
-
-    def infer(self, request: dict) -> dict:
-        arm_q = np.asarray(request["arm_q"], dtype=np.float64)
-        hand_cmds = request["hand_cmds"]
-        if self._perception is not None:
-            flange_poses = self._kin.flange_poses(arm_q)
-            percept = self._perception.observe(
-                request["rgb_left"], request["rgb_right"],
-                flange_poses, request["hand_cmds_last"])
-            state = np.asarray(percept["state"], dtype=np.float32)
-            self.last_percept = percept
-        else:
-            state = np.asarray(request["relation_state"], dtype=np.float32)
-        if state.shape != (relation_layout.RELATION_STATE_DIM,):
-            raise ValueError(
-                f"relation_state: expected ({relation_layout.RELATION_STATE_DIM},), "
-                f"got {state.shape}")
-
-        if request.get("enable_rtc") and request.get("prev_action_chunk") is not None:
-            raise NotImplementedError(
-                "RTC is not implemented for relation_eef mode "
-                "(docs/relation_deploy_plan.md §8: the rotvec-delta reanchor "
-                "math is a separate design, not built yet)")
-
-        out = self._client.infer(request.get("image"), state,
-                                 request.get("prompt", self.prompt))
-        return _convert_with_diagnostics(self, out, state, arm_q, hand_cmds)
-
-    def reset(self) -> None:
-        self._converter.reset()
+        mod, cls = _MOVED[name]
+        return getattr(importlib.import_module(f"{__package__}.modes.{mod}"), cls)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def make_adapter(action_mode: str, client, prompt: str = "", **kwargs):
     if action_mode == "joint":
-        return JointPolicyAdapter(client, prompt)
+        return __getattr__("JointPolicyAdapter")(client, prompt)
     if action_mode == "relative_eef":
-        return RelativeEEFPolicyAdapter(client, prompt, **kwargs)
+        return __getattr__("RelativeEEFPolicyAdapter")(client, prompt, **kwargs)
     if action_mode == "relation_eef":
-        return RelationPolicyAdapter(client, prompt, **kwargs)
+        return __getattr__("RelationPolicyAdapter")(client, prompt, **kwargs)
     raise ValueError(f"unknown action mode {action_mode!r}")

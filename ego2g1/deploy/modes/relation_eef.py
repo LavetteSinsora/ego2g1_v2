@@ -24,9 +24,205 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...core import relation_layout
+from ...core import relation_layout, rotvec
 from .. import gripper_calib as _gripper_calib
-from . import base
+from . import base, eef
+
+
+class RelativeEEFRotvecChunks(eef.EEFChunksBase):
+    """`relation_eef` mode: (H, 14) anchor-relative rotvec chunks -> (H, 26)
+    joints, via `EEFChunksBase`'s measured pipeline. Deploy-side analogue of
+    `ego2g1.train.relation_transforms.RelativeEEFRotvecActions` (the
+    training-side transform that built the ground truth this class inverts).
+    The two overrides:
+
+      pose decode  rotvec instead of vec9/6D: per hand, per row k,
+                       delta_T = core.rotvec.vec6_to_se3(row[EEF6[h]])   # [t(3), rotvec(3)]
+                       target  = anchor[h] @ delta_T
+                   exactly inverting `RelativeEEFRotvecActions`'s
+                       delta_k = inv(T_current) @ T_target_k
+                       row[k]  = [delta_k.t, mat_to_rotvec(delta_k.R)]
+
+      gripper      one RAW binary dim per hand (not the 6-dim absolute
+                   Revo2 command RelativeEEFChunks reads straight off the
+                   action row). `PerSlotQuantizeActionsInverse` explicitly
+                   EXEMPTS `gripper_dims` from its inverse-quantile transform
+                   (ego2g1/train/relation_transforms.py), so the value here
+                   arrives exactly as the model produced it, in the same
+                   {-1,+1}-ish convention `RelativeEEFRotvecActions` encoded
+                   {0 open, 1 closed} into (`grip = target * 2 - 1`):
+                       frac = clip((raw_grip + 1) / 2, 0, 1)
+                       cmd  = frac * closed_pose[hand]            # (6,) motor cmd
+                   `closed_pose` is a PER-ROBOT MEASUREMENT that does not
+                   exist yet; it defaults to
+                   `gripper_calib.BRAINCO_CLOSED_POSE`, a documented
+                   placeholder ("every motor fully closed") — swapping in the
+                   real measured arrays means editing only
+                   `gripper_calib.py`, nothing here.
+    """
+
+    mode = "relation_eef"
+    chunk_dim = relation_layout.ACTION_DIM
+    hands = relation_layout.HANDS
+
+    def __init__(self, kin=None, *, closed_pose: dict[str, np.ndarray] | None = None,
+                 **kwargs):
+        super().__init__(kin, **kwargs)
+        self.closed_pose = (dict(closed_pose) if closed_pose is not None
+                            else dict(_gripper_calib.BRAINCO_CLOSED_POSE))
+
+    def _delta(self, row, hand):
+        return rotvec.vec6_to_se3(row[relation_layout.EEF6[hand]])
+
+    def _hand_block(self, row, hand):
+        raw_grip = float(row[relation_layout.GRIP[hand]][0])
+        frac = float(np.clip((raw_grip + 1.0) / 2.0, 0.0, 1.0))
+        return frac * self.closed_pose[hand]
+
+    def _row_ok(self, row):
+        from .. import actions as _actions
+        return _actions.sanity_check_relation_action(row)
+
+
+class RelationPolicyAdapter:
+    """`relation_eef` mode: `EgoRelationTrainConfig` checkpoints.
+
+    Up:   (56,) relation state, HAND-MAJOR:
+              [left->obj0(9) left->obj1(9) left->obj2(9)
+               right->obj0(9) right->obj1(9) right->obj2(9)
+               grasp_left grasp_right]
+          This is the EXACT layout `ego2g1.train.relation_transforms
+          .RelationPrompt.__call__` expects on `observation/state` (re-read
+          that docstring/body before touching this class) — object order
+          must match the checkpoint's `train_config.objects`, UNSHUFFLED
+          (serving builds `create_relation_data_config(...,
+          shuffle_objects=False)`, docs/relation_deploy_plan.md §4.2).
+    Down: (H, 14) anchor-relative rotvec chunk -> `RelativeEEFRotvecChunks`
+          (OneEuroSE3 -> DualArmIK posture-tracks-last @ 0.05 -> JointFilter)
+          -> (H, 26).
+
+    Two ways to supply the relation state, chosen by whether `perception`
+    (a `ego2g1.deploy.perception.relation_perception.RelationPerception`)
+    is passed to the constructor:
+
+      perception=None (default)   Thin pass-through: the caller must place
+                                   an already-computed (56,) float32 array at
+                                   `request["relation_state"]`. This is what
+                                   every existing test in this codebase uses
+                                   (docs/relation_deploy_plan.md's Phase-1
+                                   validation, before Phase 2's live
+                                   perception existed) and remains supported
+                                   — a mocked/replayed relation state is
+                                   still the right tool for testing the
+                                   action-conversion path in isolation from
+                                   the (much more failure-prone) camera/
+                                   detector stack.
+      perception=<instance>       `infer()` calls `perception.observe(
+                                   request["rgb_left"], request["rgb_right"],
+                                   flange_poses, request["hand_cmds_last"])`
+                                   itself — `flange_poses` comes from this
+                                   adapter's own `Kinematics` (the SAME
+                                   instance the action converter uses, so the
+                                   relation state's hand-frame and the
+                                   action's anchor are the identical FK
+                                   call, never two independently-computed
+                                   flange poses that could drift apart).
+                                   `request["hand_cmds_last"]`: {hand: float
+                                   in [0, 1]}, the last-commanded gripper
+                                   FRACTION (not the old modes' (6,) motor
+                                   vector) — see `RelativeEEFRotvecChunks`'s
+                                   own `frac` convention.
+
+    Either way, the resulting layout must match EXACTLY: hand-major,
+    unshuffled object order (matching the connected checkpoint's
+    `train_config.objects`), grasp binaries at the tail, vec9 =
+    [tx,ty,tz, R[:,0], R[:,1]] per `ego2g1.core.rot6d` — a mismatched layout
+    silently mispairs an object name with the wrong geometry and serves a
+    plausible-looking but wrong policy.
+
+    RTC is NOT supported for this mode (`EgoRelationTrainConfig
+    .rtc_training = False`; the reanchor-prefix math for rotvec deltas +
+    per-slot-quantized (gripper-exempt) actions needs its own design,
+    docs/relation_deploy_plan.md §8) — `.infer` raises rather than silently
+    dropping the prefix if the caller asks for it.
+
+    `last_tracking_error` mirrors `RelativeEEFPolicyAdapter`'s contract:
+    worst IK flange error (metres) over the last converted chunk, for the
+    runner's watchdog.
+    """
+
+    mode = "relation_eef"
+
+    def __init__(self, client, prompt: str = "", *, converter=None, kin=None,
+                 ik_iters: int = 25, posture_cost: float = 0.05,
+                 collision_min_dist: float = 0.005, perception=None):
+        self._client = client
+        self.prompt = prompt
+        self.action_horizon = int(client.action_horizon)
+        self.fps = int(client.fps)
+        self._converter = converter or RelativeEEFRotvecChunks(
+            kin, fps=self.fps, ik_iters=ik_iters, posture_cost=posture_cost,
+            collision_min_dist=collision_min_dist)
+        self._kin = self._converter.kin
+        # ego2g1.deploy.perception.relation_perception.RelationPerception, or
+        # None for the pass-through contract (see class docstring). Optional
+        # so every existing test that supplies `request["relation_state"]`
+        # directly keeps working unchanged.
+        self._perception = perception
+
+    @property
+    def last_tracking_error(self) -> float:
+        return self._converter.last_tracking_error
+
+    @property
+    def perception(self):
+        """The `RelationPerception` instance backing this adapter, or `None`
+        for the pass-through contract (see class docstring). Surfaced so
+        the mode's telemetry/recorder hooks can pull dashboard-facing state
+        that lives on the perception object itself, without reaching into
+        the private `_perception` attribute."""
+        return self._perception
+
+    @property
+    def closed_pose(self) -> dict:
+        """The converter's per-hand `BRAINCO_CLOSED_POSE`-shaped (6,) array
+        (`ego2g1.deploy.gripper_calib`, possibly overridden at construction).
+        Surfaced so the mode's `hand_state_from_row` can recover the scalar
+        open/closed fraction from an executed 6-motor command
+        (`gripper_calib.frac_from_command`) for the NEXT tick's
+        `hand_cmds_last`, without reaching into the converter's private
+        internals directly."""
+        return self._converter.closed_pose
+
+    def infer(self, request: dict) -> dict:
+        arm_q = np.asarray(request["arm_q"], dtype=np.float64)
+        hand_cmds = request["hand_cmds"]
+        if self._perception is not None:
+            flange_poses = self._kin.flange_poses(arm_q)
+            percept = self._perception.observe(
+                request["rgb_left"], request["rgb_right"],
+                flange_poses, request["hand_cmds_last"])
+            state = np.asarray(percept["state"], dtype=np.float32)
+            self.last_percept = percept
+        else:
+            state = np.asarray(request["relation_state"], dtype=np.float32)
+        if state.shape != (relation_layout.RELATION_STATE_DIM,):
+            raise ValueError(
+                f"relation_state: expected ({relation_layout.RELATION_STATE_DIM},), "
+                f"got {state.shape}")
+
+        if request.get("enable_rtc") and request.get("prev_action_chunk") is not None:
+            raise NotImplementedError(
+                "RTC is not implemented for relation_eef mode "
+                "(docs/relation_deploy_plan.md §8: the rotvec-delta reanchor "
+                "math is a separate design, not built yet)")
+
+        out = self._client.infer(request.get("image"), state,
+                                 request.get("prompt", self.prompt))
+        return eef.convert_with_diagnostics(self, out, state, arm_q, hand_cmds)
+
+    def reset(self) -> None:
+        self._converter.reset()
 
 
 class RelationEEFMode(base.DeployMode):
@@ -47,8 +243,6 @@ class RelationEEFMode(base.DeployMode):
         silently mis-serve" philosophy as `ego2g1/train/stamp.py`'s
         `check_supported` and `perception/task_config.py`'s own
         `validate_against_server_metadata`."""
-        from .. import policy_adapter as _policy_adapter
-
         missing = []
         if not args.task_config:
             missing.append("--task-config")
@@ -117,8 +311,8 @@ class RelationEEFMode(base.DeployMode):
             latch_config=pcfg.latch_config(),
             tracker_kwargs=pcfg.tracker)
 
-        adapter = _policy_adapter.make_adapter(
-            "relation_eef", client, args.prompt, ik_iters=args.ik_iters,
+        adapter = RelationPolicyAdapter(
+            client, args.prompt, ik_iters=args.ik_iters,
             posture_cost=args.posture_cost,
             collision_min_dist=args.collision_min_dist,
             perception=perception)

@@ -1,15 +1,20 @@
 # Deploy refactor: plan
 
-Status: **implemented (2026-08-05), with two consciously deferred items.**
-Everything below landed as planned except: (a) §7's internal split of
-check.py into seven rung modules — check.py moved to `tools/check.py`
-wholesale and keeps its `python -m ego2g1.deploy.check <rung>` dispatcher;
-the per-rung file split + the §6.3 CLI mixins remain follow-up work; (b) the
-converter/adapter classes stayed in `actions.py`/`policy_adapter.py` (widely
-referenced by docs/tests) rather than physically moving into `modes/*.py` —
-the mode objects in `modes/` wire them, which is what the extensibility
-property needed. The fifth-mode smoke test
+Status: **fully implemented (2026-08-05).** Every section below landed,
+across two commits: the main restructure, then a follow-up completing §7
+(check.py split into seven rung modules under `tools/check/`), §6.3 (the
+`tools/cli.py` Args mixins), and the physical move of the converter/adapter
+classes into `modes/*.py` (`actions.py`/`policy_adapter.py` keep their
+historical names as lazy PEP-562 re-exports — an eager import would be
+circular through the row-layout constants). The fifth-mode smoke test
 (tests/test_deploy_modes.py) is the executable proof of §10's first bullet.
+
+Still open, but deliberately OUT of this plan's scope (they need decisions
+or hardware, not restructuring): the inert orientation-estimator hook in
+`perception/relation_perception.py` (every object's rotation is identity
+forever, honestly documented there) and `perception/depth.py`'s unverified
+SGBM constants. A future revision of the real-time object-pose pipeline is
+the natural home for both.
 Companion docs: [deploy.md](deploy.md) (the current architecture and its
 rationale — still accurate, and everything it calls load-bearing stays
 load-bearing), [relation_deploy_plan.md](relation_deploy_plan.md) (how the

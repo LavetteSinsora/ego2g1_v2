@@ -59,6 +59,7 @@ import numpy as np
 from ...core import se3
 from .. import actions as _actions
 from ..core import safety as _safety
+from . import cli as _cli
 
 logger = logging.getLogger(__name__)
 
@@ -137,22 +138,15 @@ def _reach_summary(chunk14: np.ndarray, hands: tuple[str, ...]) -> str:
     return " ".join(parts)
 
 
-@dataclasses.dataclass
-class Args:
+@dataclasses.dataclass(kw_only=True)
+class Args(_cli.RobotArgs, _cli.RunArgs, _cli.IKArgs):
     dataset: str
     episode: int = 0
     host: str = "127.0.0.1"
     port: int = 8000
     prompt: str | None = None          # override the episode's own recorded task string
-    ik_iters: int = 25
-    posture_cost: float = 0.05
-    collision_min_dist: float = 0.005
     max_step: float = 0.15             # safety clamp, rad/tick — same default as the runner
-    network_interface: str | None = None
-    max_pos_speed: float | None = None
     record_dir: str = "recordings"
-    dry_run: bool = False              # MockExecutor (MuJoCo path) instead of the real robot
-    yes: bool = False                  # skip the real-robot confirmation prompt
     max_chunks: int | None = None      # stop after N chunks regardless of episode length
 
 

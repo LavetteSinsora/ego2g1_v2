@@ -31,21 +31,18 @@ import numpy as np
 
 from ...core import layout
 from .. import actions as _actions
+from . import cli as _cli
 from .replay_dataset import accel_rms, load_episode
 
 logger = logging.getLogger(__name__)
 
 
-@dataclasses.dataclass
-class Args:
+@dataclasses.dataclass(kw_only=True)
+class Args(_cli.RobotArgs, _cli.RunArgs):
     dataset: str
     episode: int = 0
     fps: int = 30
     hands: bool = True
-    network_interface: str | None = None
-    max_pos_speed: float | None = None
-    dry_run: bool = False
-    yes: bool = False
     out: str | None = None
 
 

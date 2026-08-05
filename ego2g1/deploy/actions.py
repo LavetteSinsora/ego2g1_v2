@@ -48,8 +48,7 @@ the seam overlap; that is a bounded extra smoothing lag, not a discontinuity.
 
 import numpy as np
 
-from ..core import layout, relation_layout, rotvec, se3
-from . import gripper_calib
+from ..core import layout, relation_layout
 
 # --- executor row layout ------------------------------------------------------
 
@@ -109,230 +108,36 @@ def sanity_check_relation_action(action) -> bool:
     return True
 
 
-# --- the boundary --------------------------------------------------------------
+# --- the boundary ---------------------------------------------------------------
+# The converter classes live with their modes now (docs/deploy_refactor_plan
+# .md §1: one file per policy family — modes/joint.py, modes/relative_eef.py,
+# modes/relation_eef.py, shared machinery in modes/eef.py). Re-exported here
+# under their historical names, LAZILY (module __getattr__, PEP 562): an
+# eager `from .modes... import ...` at module scope would be circular, since
+# the modes files import THIS module for the row-layout constants above.
+
+_MOVED = {
+    "JointChunks": ("joint", "JointChunks"),
+    "RelativeEEFChunks": ("relative_eef", "RelativeEEFChunks"),
+    "RelativeEEFRotvecChunks": ("relation_eef", "RelativeEEFRotvecChunks"),
+}
 
 
-class JointChunks:
-    """`joint` mode: absolute joint chunks pass through, validated, never IK'd.
+def __getattr__(name):
+    if name in _MOVED:
+        import importlib
 
-    Accepts (H, 26) rows or (H, 14) arm-only rows; the latter are padded with
-    the observation's held hand command (absolute hand dims must still be
-    COMMANDED every tick or the Brainco driver holds stale state).
-    """
-
-    mode = "joint"
-
-    def convert(self, actions, arm_q14, hand_cmds: dict) -> np.ndarray:
-        actions = np.asarray(actions, dtype=np.float64)
-        if actions.ndim != 2 or actions.shape[1] not in (ARM_DOF, ROBOT_DIM):
-            raise ValueError(
-                f"joint mode expects (H, {ARM_DOF}) or (H, {ROBOT_DIM}), got {actions.shape}")
-        if not np.all(np.isfinite(actions)):
-            raise ValueError("joint chunk contains non-finite values")
-        out = np.empty((len(actions), ROBOT_DIM), dtype=np.float64)
-        out[:, ARM] = actions[:, :ARM_DOF]
-        if actions.shape[1] == ROBOT_DIM:
-            for h in layout.HANDS:
-                out[:, HAND[h]] = np.clip(actions[:, HAND[h]], 0.0, 1.0)
-        else:
-            for h in layout.HANDS:
-                out[:, HAND[h]] = np.clip(
-                    np.asarray(hand_cmds[h], dtype=np.float64), 0.0, 1.0)
-        return out
-
-    def reset(self) -> None:
-        pass
-
-
-class _EEFChunksBase:
-    """The measured jitter-fix pipeline, shared by both EEF modes
-    (docs/deploy_refactor_plan.md §2.2 — these were two ~95%-identical
-    classes before):
-
-        anchor = FK(measured arm q at the observation tick)   # pelvis frame
-        ground the IK at the measured q                        # close the loop
-        per row k: target_k = anchor @ self._delta(row, hand)  # mode decode
-                   target_k = OneEuroSE3(target_k)             # before IK
-                   q_k = DualArmIK(target_k)                   # posture->last, 0.05
-                   q_k = JointFilter(q_k)                      # after IK
-                   hands  = self._hand_block(row, hand)        # mode expand
-
-    Tracking error is monitored per row; rows the QP could not reach are
-    reported via `last_tracking_error` (the runner's watchdog reads it) —
-    the QP silently approximates, so somebody has to ask. The per-slot
-    residual PROFILE (`last_slot_errors`), not just the max, is kept: a
-    residual growing with slot index means inflated deltas (per-slot rescale
-    missing server-side); a flat offset from slot 0 means an anchor/frame
-    bug (the 138 mm E-STOP of 2026-07-17 was diagnosed blind for lack of it).
-
-    Subclasses fix the model-space layout with four small members:
-    `chunk_dim`, `hands`, `_delta(row, hand) -> (4, 4)` (the anchor-relative
-    pose decode), `_hand_block(row, hand) -> (6,)` (the hand-command
-    expansion), and `_row_ok(row) -> bool` (the model-space sanity guard).
-    """
-
-    mode: str
-    chunk_dim: int
-    hands: tuple
-
-    def __init__(self, kin=None, *, fps: int = 30, ik_iters: int = 25,
-                 posture_cost: float = 0.05, collision_min_dist: float = 0.005,
-                 one_euro_kwargs: dict | None = None):
-        from ..kin.filters import OneEuroSE3   # numpy-only
-
-        if kin is None:
-            from .core.kinematics import Kinematics  # mujoco enters here, lazily
-            kin = Kinematics(ik_iters=ik_iters, fps=fps,
-                             posture_cost=posture_cost,
-                             collision_min_dist=collision_min_dist)
-        self.kin = kin
-        self.dt = 1.0 / float(fps)
-        kw = one_euro_kwargs or {}
-        self._smoother = {h: OneEuroSE3(**kw) for h in self.hands}
-        self.last_tracking_error: float = 0.0
-        self.last_slot_errors = np.zeros(0)
-        # per-slot flange target POSITIONS (pelvis frame, post-One-Euro — the
-        # pose the IK is actually judged against), for the recorder / the
-        # MuJoCo replay's "where the policy wanted the hand" marker
-        self.last_targets: dict[str, np.ndarray] = {}
-
-    # --- the mode-specific decode, overridden by subclasses -------------------
-
-    def _delta(self, row: np.ndarray, hand: str) -> np.ndarray:
-        raise NotImplementedError
-
-    def _hand_block(self, row: np.ndarray, hand: str) -> np.ndarray:
-        raise NotImplementedError
-
-    def _row_ok(self, row: np.ndarray) -> bool:
-        raise NotImplementedError
-
-    # --- the shared pipeline ---------------------------------------------------
-
-    def convert(self, actions, arm_q14, hand_cmds: dict) -> np.ndarray:
-        actions = np.asarray(actions, dtype=np.float64)
-        if actions.ndim != 2 or actions.shape[1] != self.chunk_dim:
-            raise ValueError(
-                f"{self.mode} mode expects (H, {self.chunk_dim}), got {actions.shape}")
-        if not np.all(np.isfinite(actions)):
-            raise ValueError(f"{self.mode} chunk contains non-finite values")
-        for k, row in enumerate(actions):
-            if not self._row_ok(row):
-                raise ValueError(
-                    f"{self.mode} chunk row {k} fails the model-space sanity "
-                    "guard (delta metres long, rotation past 2π, or gripper "
-                    "far outside its convention) — a mis-normalized or "
-                    "corrupted chunk; refusing to make it a pose")
-
-        anchor = self.kin.flange_poses(arm_q14)
-        self.kin.ground(arm_q14)
-
-        out = np.empty((len(actions), ROBOT_DIM), dtype=np.float64)
-        slot_err = np.zeros(len(actions))
-        tgt_pos = {h: np.empty((len(actions), 3)) for h in self.hands}
-        for k, row in enumerate(actions):
-            targets = {}
-            for h in self.hands:
-                T = anchor[h] @ self._delta(row, h)
-                targets[h] = self._smoother[h].filter(T, self.dt)
-                tgt_pos[h][k] = targets[h][:3, 3]
-            out[k, ARM] = self.kin.solve(targets)
-            slot_err[k] = max(self.kin.tracking_error(targets).values())
-            for h in self.hands:
-                out[k, HAND[h]] = self._hand_block(row, h)
-        self.last_targets = tgt_pos
-        self.last_slot_errors = slot_err
-        self.last_tracking_error = float(slot_err.max()) if len(slot_err) else 0.0
-        return out
-
-    def reset(self) -> None:
-        """Episode start / after an e-stop: clear all causal filter state so the
-        first chunk is not blended with a stale trajectory."""
-        for s in self._smoother.values():
-            s.reset()
-        self.kin.reset()
-
-
-class RelativeEEFChunks(_EEFChunksBase):
-    """`relative_eef` mode: (H, 30) anchor-relative vec9 chunks -> (H, 26)
-    joints, via `_EEFChunksBase`'s measured pipeline. The decode is
-    `core.se3.compose` (anchor @ vec9_to_se3(delta)); hand dims are absolute
-    Revo2 commands read straight off the action row, clipped to [0, 1]."""
-
-    mode = "relative_eef"
-    chunk_dim = layout.DIM
-    hands = layout.HANDS
-
-    def _delta(self, row, hand):
-        return se3.vec9_to_se3(row[layout.EEF[hand]])
-
-    def _hand_block(self, row, hand):
-        return np.clip(row[layout.HAND[hand]], 0.0, 1.0)
-
-    def _row_ok(self, row):
-        return sanity_check_model_action(row)
-
-
-class RelativeEEFRotvecChunks(_EEFChunksBase):
-    """`relation_eef` mode: (H, 14) anchor-relative rotvec chunks -> (H, 26)
-    joints, via `_EEFChunksBase`'s measured pipeline. Deploy-side analogue of
-    `ego2g1.train.relation_transforms.RelativeEEFRotvecActions` (the
-    training-side transform that built the ground truth this class inverts).
-    The two overrides:
-
-      pose decode  rotvec instead of vec9/6D: per hand, per row k,
-                       delta_T = core.rotvec.vec6_to_se3(row[EEF6[h]])   # [t(3), rotvec(3)]
-                       target  = anchor[h] @ delta_T
-                   exactly inverting `RelativeEEFRotvecActions`'s
-                       delta_k = inv(T_current) @ T_target_k
-                       row[k]  = [delta_k.t, mat_to_rotvec(delta_k.R)]
-
-      gripper      one RAW binary dim per hand (not the 6-dim absolute
-                   Revo2 command RelativeEEFChunks reads straight off the
-                   action row). `PerSlotQuantizeActionsInverse` explicitly
-                   EXEMPTS `gripper_dims` from its inverse-quantile transform
-                   (ego2g1/train/relation_transforms.py), so the value here
-                   arrives exactly as the model produced it, in the same
-                   {-1,+1}-ish convention `RelativeEEFRotvecActions` encoded
-                   {0 open, 1 closed} into (`grip = target * 2 - 1`):
-                       frac = clip((raw_grip + 1) / 2, 0, 1)
-                       cmd  = frac * closed_pose[hand]            # (6,) motor cmd
-                   `closed_pose` is a PER-ROBOT MEASUREMENT that does not
-                   exist yet; it defaults to
-                   `gripper_calib.BRAINCO_CLOSED_POSE`, a documented
-                   placeholder ("every motor fully closed") — swapping in the
-                   real measured arrays means editing only
-                   `gripper_calib.py`, nothing here.
-    """
-
-    mode = "relation_eef"
-    chunk_dim = relation_layout.ACTION_DIM
-    hands = relation_layout.HANDS
-
-    def __init__(self, kin=None, *, closed_pose: dict[str, np.ndarray] | None = None,
-                 **kwargs):
-        super().__init__(kin, **kwargs)
-        self.closed_pose = (dict(closed_pose) if closed_pose is not None
-                            else dict(gripper_calib.BRAINCO_CLOSED_POSE))
-
-    def _delta(self, row, hand):
-        return rotvec.vec6_to_se3(row[relation_layout.EEF6[hand]])
-
-    def _hand_block(self, row, hand):
-        raw_grip = float(row[relation_layout.GRIP[hand]][0])
-        frac = float(np.clip((raw_grip + 1.0) / 2.0, 0.0, 1.0))
-        return frac * self.closed_pose[hand]
-
-    def _row_ok(self, row):
-        return sanity_check_relation_action(row)
+        mod, cls = _MOVED[name]
+        return getattr(importlib.import_module(f"{__package__}.modes.{mod}"), cls)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def make_converter(action_mode: str, **kwargs):
     if action_mode == "joint":
-        return JointChunks()
+        return __getattr__("JointChunks")()
     if action_mode == "relative_eef":
-        return RelativeEEFChunks(**kwargs)
+        return __getattr__("RelativeEEFChunks")(**kwargs)
     if action_mode == "relation_eef":
-        return RelativeEEFRotvecChunks(**kwargs)
+        return __getattr__("RelativeEEFRotvecChunks")(**kwargs)
     raise ValueError(f"unknown action mode {action_mode!r} "
                      "(expected 'joint', 'relative_eef', or 'relation_eef')")
