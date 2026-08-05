@@ -344,3 +344,86 @@ class TestDashboardHooks:
         latch_events = [e for e in perception.recent_events() if e["kind"] == "latch"]
         assert [e["state"] for e in latch_events] == ["unlatched", "candidate", "latched"]
         assert latch_events[-1]["object"] == target
+
+
+class TestReset:
+    """`reset()` is meant to be called exactly once, right after the startup
+    latency self-check's one-shot probe inference -- discard whatever that
+    probe's real DINO/SAM2 pass seeded (docs: `runner.main`'s call site).
+    It must put every piece of state back to fresh-instance equivalent, not
+    just the trackers."""
+
+    def test_reset_wipes_trackers_and_forces_a_fresh_detection(self):
+        perception, detector = _perception(detector_period_ticks=15)
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        hand_cmds = {"left": 0.0, "right": 0.0}
+
+        perception.observe(_rgb(), _rgb(), flange, hand_cmds)   # tick 0: seeds + 1 detector call
+        perception.observe(_rgb(), _rgb(), flange, hand_cmds)   # tick 1: tracker-only, no call
+        assert len(detector.calls) == 1
+        assert perception._tick == 2
+
+        perception.reset()
+        assert perception._tick == 0
+        assert perception.trackers == {}
+
+        # One object now goes undetected post-reset: with the trackers truly
+        # wiped it has NO fallback pose to hold (unlike a mid-session miss,
+        # which would fall through to ObjectTracker.predict) -- proof this
+        # is a genuine "never seen" state, not just the tick counter rewound.
+        missing = perception.task_config.objects[0].instance_id
+        detector.clear_detection(missing)
+        with pytest.raises(RuntimeError, match=missing):
+            perception.observe(_rgb(), _rgb(), flange, hand_cmds)
+        # that failed call still counted as a detector tick (tick was 0, 0 % period == 0)
+        assert len(detector.calls) == 2
+
+    def test_reset_clears_latch_state(self):
+        cfg = _task_config(hands=("left",))
+        perception, detector = _perception(
+            task_config=cfg, latch_config=LatchConfig(confirm_window_ticks=5, max_track_loss_ticks=1)
+        )
+        target = cfg.objects[1].instance_id
+        for obj in cfg.objects:
+            u = CX if obj.instance_id == target else CX + 20.0
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, u, CY))
+
+        flange = {"left": np.eye(4)}
+        perception.observe(_rgb(), _rgb(), flange, {"left": 0.0})
+        for k in range(1, 8):
+            hand_t = np.array([0.0, 0.0, 1.0]) + np.array([0.001 * k, 0.0, 0.0])
+            flange_k = {"left": np.eye(4)}
+            flange_k["left"][:3, 3] = hand_t
+            shift_u = CX + FX * (0.001 * k) / 1.0
+            detector.set_detection(target, _box_detection(target, shift_u, CY))
+            perception.observe(_rgb(), _rgb(), flange_k, {"left": 1.0})
+        assert perception.latches["left"].state == LatchState.LATCHED
+
+        perception.reset()
+        assert perception.latches["left"].state == LatchState.UNLATCHED
+        assert perception.latches["left"].latched_object is None
+
+    def test_reset_clears_dashboard_facing_caches(self):
+        perception, detector = _perception()
+        for obj in perception.task_config.objects:
+            detector.set_detection(obj.instance_id, _box_detection(obj.instance_id, CX, CY))
+        flange = {"left": np.eye(4), "right": np.eye(4)}
+        perception.observe(_rgb(), _rgb(), flange, {"left": 1.0, "right": 0.0})
+
+        assert perception.last_rgb_left is not None
+        assert perception.last_detections
+        assert perception.last_flange_poses is not None
+        assert perception.last_object_debug
+        assert perception.last_latch_results
+        assert perception.recent_events()
+
+        perception.reset()
+        assert perception.last_rgb_left is None
+        assert perception.last_detections == {}
+        assert perception.last_flange_poses is None
+        assert perception.last_object_debug == {}
+        assert perception.last_latch_results == {}
+        assert perception.detector_ticked_last is False
+        assert perception.recent_events() == []

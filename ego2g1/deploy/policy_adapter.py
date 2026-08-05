@@ -33,6 +33,23 @@ from ..core import layout, relation_layout, se3
 from . import actions as _actions
 
 
+def _convert_with_diagnostics(adapter, out: dict, state, arm_q, hand_cmds) -> dict:
+    """The EEF adapters' shared reply tail (was copy-pasted in both): keep the
+    raw model-space chunk + the request state for the recorder — without them
+    a bad served chunk is undiagnosable from the recording — then convert to
+    joint rows and surface the converter's per-slot telemetry."""
+    adapter.last_state = np.asarray(state, dtype=np.float64)
+    adapter.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
+    out["actions"] = adapter._converter.convert(out["actions"], arm_q, hand_cmds)
+    out["slot_errors_m"] = getattr(adapter._converter, "last_slot_errors", None)
+    out["raw_chunk"] = adapter.last_raw_chunk
+    out["request_state"] = adapter.last_state
+    # per-slot flange target positions (pelvis frame) — replay_mujoco.py's
+    # RED "where the policy wanted the hand" marker
+    out["flange_targets"] = getattr(adapter._converter, "last_targets", None)
+    return out
+
+
 class JointPolicyAdapter:
     """`joint` mode: the model space IS the executor space (ZH-style).
 
@@ -119,18 +136,7 @@ class RelativeEEFPolicyAdapter:
         out = self._client.infer(request.get("image"), state,
                                  request.get("prompt", self.prompt),
                                  prev_chunk=prev, d=d, n_prefix=n_prefix)
-        # keep the raw model-space chunk + the request state for the recorder:
-        # without them a bad served chunk is undiagnosable from the recording
-        self.last_state = np.asarray(state, dtype=np.float64)
-        self.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
-        out["actions"] = self._converter.convert(out["actions"], arm_q, hand_cmds)
-        out["slot_errors_m"] = getattr(self._converter, "last_slot_errors", None)
-        out["raw_chunk"] = self.last_raw_chunk
-        out["request_state"] = self.last_state
-        # per-slot flange target positions (pelvis frame) — replay_mujoco.py's
-        # RED "where the policy wanted the hand" marker
-        out["flange_targets"] = getattr(self._converter, "last_targets", None)
-        return out
+        return _convert_with_diagnostics(self, out, state, arm_q, hand_cmds)
 
     def _reanchor_joint_rows(self, rows, arm_q_new) -> tuple[np.ndarray, int]:
         """(K, 26) joint rows -> (H, 30) model-space prefix vs the NEW anchor.
@@ -293,16 +299,7 @@ class RelationPolicyAdapter:
 
         out = self._client.infer(request.get("image"), state,
                                  request.get("prompt", self.prompt))
-        # keep the raw model-space chunk + the request state for the recorder,
-        # same reasoning as RelativeEEFPolicyAdapter: undiagnosable otherwise
-        self.last_state = state
-        self.last_raw_chunk = np.asarray(out["actions"], dtype=np.float64)
-        out["actions"] = self._converter.convert(out["actions"], arm_q, hand_cmds)
-        out["slot_errors_m"] = getattr(self._converter, "last_slot_errors", None)
-        out["raw_chunk"] = self.last_raw_chunk
-        out["request_state"] = self.last_state
-        out["flange_targets"] = getattr(self._converter, "last_targets", None)
-        return out
+        return _convert_with_diagnostics(self, out, state, arm_q, hand_cmds)
 
     def reset(self) -> None:
         self._converter.reset()

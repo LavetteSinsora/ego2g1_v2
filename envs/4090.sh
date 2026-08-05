@@ -130,6 +130,11 @@ fi
     export EGO2G1_STEREO_CALIB="$_EGO2G1_ROOT/stereo_calib.npz"
 [ -f "$_EGO2G1_ROOT/camera_calib.npz" ] && \
     export EGO2G1_CAMERA_EXTRINSIC="$_EGO2G1_ROOT/camera_calib.npz"
+# optional: perception tuning knobs (detector cadence, latch thresholds,
+# tracker gating, SGBM) — ego2g1/deploy/perception/config.py; omitted means
+# the constructors' own defaults
+[ -f "$_EGO2G1_ROOT/perception_config.yaml" ] && \
+    export EGO2G1_PERCEPTION_CONFIG="$_EGO2G1_ROOT/perception_config.yaml"
 
 # --- HuggingFace: mirror + repo-local cache (relation_eef's GroundingDINO/SAM2) ---
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"

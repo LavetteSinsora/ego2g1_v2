@@ -176,11 +176,17 @@ def _cli_solve(points_camera_npy: str, points_pelvis_npy: str, out_npz: str = ""
             "go/no-go bound (§6.2) -- do not trust this calibration on hardware."
         )
     if out_npz:
+        import datetime
+
         np.savez(
             out_npz,
             T_pelvis_camera=T,
             rms_residual_m=np.float64(rms),
             n_points=np.int64(points_camera.shape[0]),
+            # provenance (docs/deploy_refactor_plan.md §6.2): two solvers
+            # write this same artifact; the loader logs which one and when
+            method="touch_calib",
+            solved_iso=datetime.datetime.now().isoformat(timespec="seconds"),
         )
         print(f"saved -> {out_npz}")
 

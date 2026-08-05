@@ -26,12 +26,15 @@ relation_eef mode too — training only ever saw one egocentric view) is
 unaffected.
 """
 
+import os
 import threading
 import time
 
 import numpy as np
 
-DEFAULT_HOST = "192.168.123.164"   # G1 head board; override with --camera-host
+DEFAULT_HOST = os.environ.get("EGO2G1_CAMERA_HOST", "192.168.123.164")
+# ^ G1 head board — the ONE place the lab IP lives in code; envs/*.sh
+#   export EGO2G1_CAMERA_HOST per machine, --camera-host still overrides.
 
 
 class HeadCamera:

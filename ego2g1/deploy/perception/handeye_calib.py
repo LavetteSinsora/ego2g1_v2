@@ -348,6 +348,8 @@ def _cli_solve(samples_npz: str, out_npz: str = "camera_calib.npz") -> None:
             f"{CONSISTENCY_WARN_ROTATION_DEG:.1f} deg) -- do not trust this before "
             "capturing more/better-varied samples."
         )
+    import datetime
+
     np.savez(
         out_npz,
         T_pelvis_camera=T_pelvis_camera,
@@ -355,6 +357,10 @@ def _cli_solve(samples_npz: str, out_npz: str = "camera_calib.npz") -> None:
         rotation_spread_deg=np.float64(report["rotation_spread_deg"]),
         translation_std_m=np.float64(report["translation_std_m"]),
         rotation_spread_deg_estimate=np.float64(report["rotation_spread_deg_estimate"]),
+        # provenance (docs/deploy_refactor_plan.md §6.2): two solvers write
+        # this same artifact; the loader logs which one and when
+        method="handeye_calib",
+        solved_iso=datetime.datetime.now().isoformat(timespec="seconds"),
     )
     print(f"saved -> {out_npz}" + ("  (SUSPECT, see above)" if suspect else ""))
 

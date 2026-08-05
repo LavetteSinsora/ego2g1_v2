@@ -175,7 +175,8 @@ stop). G1-D reality: no lower body, fixed/suspended base, direct `rt/lowcmd`
 ## Recording
 
 Every runner session writes `recordings/<task>_<stamp>/events.jsonl` +
-`head.mp4` + `meta.json` (see `deploy/recorder.py` for the event kinds). This
+`head.mp4` + `meta.json` (the event kinds and the meta contract live in
+`deploy/record/schema.py` — the recorder refuses undeclared kinds). This
 is not optional: the freeze-lurch was diagnosed from exactly this stream in
 the old repo. `--no-record` exists for dry runs only.
 

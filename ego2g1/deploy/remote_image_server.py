@@ -23,13 +23,15 @@ filesystem changes again, update `DEFAULT_CANDIDATE_PATHS`, not the callers.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SSH_USER = "unitree"
-DEFAULT_SSH_PASSWORD = "123"   # docs/robot.md's own documented lab default
-DEFAULT_CONDA_ENV = "tv"       # docs/robot.md: "conda activate tv"
+DEFAULT_SSH_USER = os.environ.get("EGO2G1_ROBOT_SSH_USER", "unitree")
+DEFAULT_SSH_PASSWORD = os.environ.get("EGO2G1_ROBOT_SSH_PASSWORD", "123")
+# ^ docs/robot.md's own documented lab default; override via env
+DEFAULT_CONDA_ENV = os.environ.get("EGO2G1_ROBOT_CONDA_ENV", "tv")  # docs/robot.md: "conda activate tv"
 
 # In the order to try. The first is the one that's actually under the home
 # directory in what looks like a live "service" install; the rest are

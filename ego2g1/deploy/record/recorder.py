@@ -1,0 +1,316 @@
+"""Record a deploy session so it can be reconstructed post-hoc at any tick.
+
+Ported from the old deploy's recorder.py (third_party/openpi/ego2g1/deploy) —
+the reason the jitter was diagnosable at all. jitter_root_cause.md's latency
+and splice numbers were read straight out of one of these event streams. It is
+not optional instrumentation: a rollout that was not recorded cannot be
+debugged, only re-run.
+
+The trick that makes it cheap: nothing is snapshotted. The runner's state (the
+active chunk, the strategy's splice indices, what was sent to the executor) is
+a pure function of a small, timestamped EVENT STREAM, so we log the declared
+event kinds at the existing seams and replay them offline.
+
+The event kinds and the meta.json contract live in `record/schema.py` — ONE
+source of truth (this docstring used to carry the list and silently drifted
+from the code; it no longer tries). `log()` refuses an undeclared kind, and
+`record.schema.build_meta` is the only way callers assemble the meta dict.
+
+ISOLATION contract: nothing here runs on, or blocks, a hot thread. `log()`
+builds a small dict and enqueues; one daemon writer drains to JSONL; a second
+daemon pumps cameras to MP4. Session layout::
+
+    <root>/<task>_<ISO8601>/
+        events.jsonl    one JSON object per line
+        frames.jsonl    {"cam", "frame_id", "t"} — the video<->clock map
+        <cam>.mp4       per camera
+        meta.json       horizon, fps, layout, clock epochs, ...
+"""
+
+import datetime
+import json
+import logging
+import pathlib
+import queue
+import threading
+import time
+
+import numpy as np
+
+from . import schema as _schema
+
+logger = logging.getLogger(__name__)
+
+_SENTINEL = object()
+
+
+def _san(v):
+    """Make a value JSON-safe, eagerly, on the calling (possibly hot) thread so
+    the writer never races an array the loop reuses after enqueue."""
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.floating, np.integer)):
+        return v.item()
+    if isinstance(v, dict):
+        return {k: _san(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_san(x) for x in v]
+    return v
+
+
+class _VideoSink:
+    """Append-only MP4, indexed by frame number. Offline we seek by frame_id
+    and map time->frame_id through frames.jsonl; the container's own fps is
+    nominal and its timestamps are never trusted."""
+
+    def __init__(self, path: pathlib.Path, *, nominal_fps: float = 30.0):
+        self.path = path
+        self._fps = float(nominal_fps)
+        self._writer = None
+        self._n = 0
+
+    def append(self, frame_bgr) -> int:
+        import cv2
+
+        if self._writer is None:
+            h, w = frame_bgr.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(str(self.path), fourcc, self._fps, (w, h))
+            if not self._writer.isOpened():
+                raise RuntimeError(f"could not open VideoWriter at {self.path}")
+        fid = self._n
+        self._writer.write(frame_bgr)
+        self._n += 1
+        return fid
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+
+
+class Recorder:
+    """One recording session. Construct, `start()`, feed `log()` from the
+    loop's seams, `stop()` when done. `cameras` is {name: obj-with-.read()};
+    None values (no wrist camera yet) are skipped."""
+
+    def __init__(self, session_dir, *, meta: dict, cameras: dict | None = None,
+                 pump_hz: float = 30.0):
+        self.dir = pathlib.Path(session_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._meta = dict(meta)
+        self._cams = {k: v for k, v in (cameras or {}).items() if v is not None}
+        self._pump_period = 1.0 / float(pump_hz)
+
+        self._q: queue.SimpleQueue = queue.SimpleQueue()
+        self._stop = threading.Event()
+        self._writer_thread = None
+        self._pump_thread = None
+
+        self._sinks = {name: _VideoSink(self.dir / f"{name}.mp4") for name in self._cams}
+        # Latest frame_id per camera, so `obs` events can name the frame the
+        # model most likely saw. Plain int reads; one-frame-stale is harmless.
+        self._latest = {name: -1 for name in self._cams}
+
+        self._events = None
+        self._frames = None
+
+    # --- lifecycle ----------------------------------------------------------
+
+    def start(self):
+        self._meta.update({
+            "t0_monotonic": time.monotonic(),
+            "t0_wall": time.time(),
+            "started_iso": datetime.datetime.now().isoformat(timespec="seconds"),
+            "cameras": list(self._cams),
+        })
+        (self.dir / "meta.json").write_text(json.dumps(_san(self._meta), indent=2))
+        self._events = open(self.dir / "events.jsonl", "w", buffering=1)
+        self._frames = open(self.dir / "frames.jsonl", "w", buffering=1)
+
+        self._writer_thread = threading.Thread(target=self._drain, name="rec-writer",
+                                               daemon=True)
+        self._writer_thread.start()
+        if self._cams:
+            self._pump_thread = threading.Thread(target=self._pump, name="rec-pump",
+                                                 daemon=True)
+            self._pump_thread.start()
+        logger.info("recording -> %s", self.dir)
+
+    def stop(self):
+        self._stop.set()
+        if self._pump_thread is not None:
+            self._pump_thread.join(timeout=2.0)
+        self._q.put(_SENTINEL)
+        if self._writer_thread is not None:
+            self._writer_thread.join(timeout=5.0)
+        for s in self._sinks.values():
+            s.close()
+        for f in (self._events, self._frames):
+            if f is not None:
+                f.close()
+        logger.info("recording closed: %s", self.dir)
+
+    # --- producer side (called from loop threads) ---------------------------
+
+    def log(self, kind: str, **fields) -> None:
+        """Enqueue one event. Hot-path safe: sanitise (small copies) + put.
+        The kind must be declared in record/schema.py — a typo'd kind used to
+        vanish silently into the JSONL, unreadable by every replay tool."""
+        if kind not in _schema.EVENT_KINDS:
+            raise ValueError(
+                f"undeclared recorder event kind {kind!r} — declare it in "
+                f"ego2g1/deploy/record/schema.py (known: "
+                f"{sorted(_schema.EVENT_KINDS)})")
+        rec = {"t": time.monotonic(), "kind": kind}
+        for k, v in fields.items():
+            rec[k] = _san(v)
+        self._q.put(rec)
+
+    def latest_frame_id(self, cam: str) -> int:
+        return self._latest.get(cam, -1)
+
+    # --- consumer side (own daemon threads) ---------------------------------
+
+    def _drain(self):
+        while True:
+            item = self._q.get()
+            if item is _SENTINEL:
+                break
+            try:
+                if item.get("kind") == "_frame":
+                    json.dump({"cam": item["cam"], "frame_id": item["frame_id"],
+                               "t": item["t"]}, self._frames)
+                    self._frames.write("\n")
+                else:
+                    json.dump(item, self._events)
+                    self._events.write("\n")
+            except Exception:
+                logger.exception("recorder writer dropped an event")
+
+    def _pump(self):
+        import cv2
+
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            for name, cam in self._cams.items():
+                try:
+                    frame = cam.read()
+                except Exception:
+                    frame = None
+                if frame is None:
+                    continue
+                bgr = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR)
+                try:
+                    fid = self._sinks[name].append(bgr)
+                except Exception:
+                    logger.exception("video sink %s failed; disabling", name)
+                    continue
+                self._latest[name] = fid
+                self._q.put({"kind": "_frame", "cam": name, "frame_id": fid,
+                             "t": time.monotonic()})
+            time.sleep(max(0.0, self._pump_period - (time.perf_counter() - t0)))
+
+
+class RecorderSwitch:
+    """A recorder-shaped proxy whose backing session can be swapped mid-run.
+
+    The runner, strategy, and inference worker all hold ONE recorder reference
+    for their lifetime; the dashboard's Record button needs session boundaries
+    (stop this session, start a fresh directory). This proxy is that seam:
+    everyone logs through the switch, and `toggle()` swaps the delegate. While
+    off, events are dropped (NullRecorder semantics).
+
+    Thread-safety: `log()` is called from hot-ish threads while `toggle()` runs
+    on the dashboard's HTTP thread. The delegate is swapped under a lock;
+    log() takes a plain reference read (one event racing a toggle lands in
+    either session or nowhere — harmless, same as the old loop's `_rec` read).
+    """
+
+    def __init__(self, root, task: str, *, meta: dict, cameras: dict | None = None):
+        self._root = root
+        self._task = task
+        self._meta = dict(meta)
+        self._cameras = cameras or {}
+        self._rec: Recorder | None = None
+        self._lock = threading.Lock()
+
+    # --- producer surface (what runner/strategy/worker call) -----------------
+
+    def log(self, kind: str, **fields) -> None:
+        rec = self._rec
+        if rec is not None:
+            rec.log(kind, **fields)
+
+    def latest_frame_id(self, cam: str) -> int:
+        rec = self._rec
+        return rec.latest_frame_id(cam) if rec is not None else -1
+
+    @property
+    def dir(self):
+        rec = self._rec
+        return rec.dir if rec is not None else None
+
+    @property
+    def recording(self) -> bool:
+        return self._rec is not None
+
+    # --- lifecycle ------------------------------------------------------------
+
+    def start(self):
+        """Open the first session (launch-time auto-record)."""
+        with self._lock:
+            if self._rec is None:
+                self._rec = Recorder(new_session(self._root, self._task),
+                                     meta=self._meta, cameras=self._cameras)
+                self._rec.start()
+
+    def stop(self):
+        with self._lock:
+            rec, self._rec = self._rec, None
+        if rec is not None:
+            rec.stop()
+
+    def toggle(self) -> dict:
+        """Stop the live session, or open a fresh one. The dashboard's Record
+        button contract: {"recording": bool, "dir": str}."""
+        with self._lock:
+            if self._rec is not None:
+                rec, self._rec = self._rec, None
+                rec.stop()
+                return {"recording": False, "dir": str(rec.dir)}
+            rec = Recorder(new_session(self._root, self._task),
+                           meta=self._meta, cameras=self._cameras)
+            rec.start()
+            self._rec = rec
+            return {"recording": True, "dir": str(rec.dir)}
+
+
+class NullRecorder:
+    """Same producer API, writes nothing — for tests and --no-record."""
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def log(self, kind: str, **fields) -> None:
+        pass
+
+    def latest_frame_id(self, cam: str) -> int:
+        return -1
+
+
+def new_session(root, task: str) -> pathlib.Path:
+    """`<root>/<task-slug>_<ISO8601>` — a fresh directory for one recording.
+    Suffixed if it already exists: two toggles inside one second must not
+    reopen (and truncate) the previous session."""
+    slug = "".join(c if c.isalnum() else "_" for c in task)[:40].strip("_") or "session"
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    path = pathlib.Path(root) / f"{slug}_{stamp}"
+    k = 1
+    while path.exists():
+        k += 1
+        path = pathlib.Path(root) / f"{slug}_{stamp}_{k}"
+    return path

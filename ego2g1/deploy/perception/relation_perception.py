@@ -24,10 +24,15 @@ enforced once at connect time via `task_config.validate_against_server_metadata`
      duck-types `detector.ObjectQuery` (both are plain `instance_id`/
      `detector_prompt` attributes), so `task_config.objects` is passed
      straight through, no adapter class needed.
-  2. A found detection's pixel centroid (mask-median if a mask is present,
-     else box center) is looked up in `depth_source.estimate(...)`'s depth
-     map and back-projected to a camera-frame 3D point via the calibration's
-     `K_left` (pinhole back-projection: `X = (u-cx)*Z/fx`, `Y = (v-cy)*Z/fy`).
+  2. A found detection's pixel centroid (mask MEAN centroid if a mask is
+     present — `Detection.centroid_uv`'s own definition — else box center)
+     is paired with the MEDIAN depth over the mask (`_sample_depth`, robust
+     to boundary noise) and back-projected to a camera-frame 3D point via
+     the calibration's `K_left` (pinhole back-projection:
+     `X = (u-cx)*Z/fx`, `Y = (v-cy)*Z/fy`). Note the deliberate asymmetry:
+     mean pixel, median depth — for a non-convex mask these describe
+     slightly different physical points; acceptable at centroid-of-object
+     precision, but don't call both "median".
   3. The point is placed in the PELVIS frame via `T_pelvis_camera` (§6's
      touch-calibration output) and fed to that object's `ObjectTracker`
      (created lazily on first detection) -- `.update(...)` if detected this
@@ -114,6 +119,22 @@ def _sample_depth(detection: Detection, depth_map: np.ndarray) -> float | None:
     return z if z > 0 else None
 
 
+def _encode_mask_png(mask: np.ndarray) -> str:
+    """(H, W) bool -> base64 PNG string. PNG compresses a mostly-solid binary
+    mask hard (typically low single-digit KB), so inlining it in a `percept`
+    recorder event (JSONL, text) is cheap at detector cadence (~2 Hz) --
+    cheaper than standing up a separate sidecar-file mechanism for something
+    this small. Lazy cv2 import, same discipline as the rest of this
+    package's __init__ docstring."""
+    import base64
+
+    import cv2
+
+    img = (np.asarray(mask, dtype=bool) * 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".png", img)
+    return base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
+
+
 def _pose_from(position: np.ndarray, rotation: np.ndarray) -> np.ndarray:
     T = np.eye(4, dtype=np.float64)
     T[:3, :3] = rotation
@@ -159,7 +180,12 @@ class RelationPerception:
         *,
         fps: int = 30,
         detector_period_ticks: int | None = None,  # None -> round(fps / 2), ~2 Hz (§5.3)
-        orientation_period_ticks: int = 6,  # ~0.2 Hz at fps=30 (§5.3's cadence)
+        orientation_period_ticks: int = 6,  # every 6 ticks = 5 Hz at fps=30.
+        # NOTE: the plan's §5.3 asked for ~0.2 Hz (one refresh per 5 s, i.e.
+        # ~150 ticks); this default has always been 6 and is inert today
+        # (orientation_estimator defaults to None). Revisit the value when a
+        # real estimator lands — a GPU/VLM-priced estimator at 5 Hz would
+        # blow the tick budget the detector cadence protects.
         orientation_estimator: OrientationEstimator | None = None,
         nominal_rotations: dict[str, np.ndarray] | None = None,
         symmetry_groups: dict[str, SymmetryGroup] | None = None,
@@ -205,9 +231,55 @@ class RelationPerception:
         # returns for the dashboard's main camera pane.
         self.last_rgb_left: np.ndarray | None = None
         self.last_detections: dict[str, Detection] = {}
+        self.last_flange_poses: dict[str, np.ndarray] | None = None
+        self.last_object_debug: dict[str, ObjectDebug] = {}
+        self.last_latch_results: dict[str, LatchResult] = {}
+        # True on ticks where last_detections/last_rgb_left actually refreshed
+        # this instant (vs. holding the previous detector-cadence values) --
+        # debug_snapshot()'s include_masks default reads this so a recorder
+        # doesn't re-encode the same PNG on every tick between refreshes.
+        self.detector_ticked_last: bool = False
         self._events: collections.deque = collections.deque(maxlen=500)
         self._prev_hand_closed: dict[str, bool] = {}
         self._prev_latch_state: dict[str, str] = {}   # LatchState.value strings
+
+    def reset(self) -> None:
+        """Discard ALL live perception state: trackers, orientation
+        refiners, latch state machines, the detector-cadence tick counter,
+        and every dashboard/recorder-facing cache -- back to exactly the
+        state a freshly-constructed instance would be in.
+
+        Call this EXACTLY ONCE, right after the startup latency self-check's
+        one-shot probe inference (`runner.main`'s own `adapter.reset()` call
+        already clears the action converter's filters at that point, but it
+        has no reference to this object and does not touch it). An
+        arbitrary -- possibly long -- gap can pass between that probe and
+        the operator actually pressing Start, during which the scene may
+        have changed completely; the probe's one DINO/SAM2 pass and
+        whatever it seeded into `_trackers`/`_latches` should not be trusted
+        as the state the real rollout starts from.
+
+        Deliberately NOT wired into `DeployRunner._rearm()` (the
+        Pause -> Start / `begin()` path): a routine pause mid-session is not
+        evidence the world changed, and forcing every object back to
+        "never detected" on every resume would also cost a fresh
+        `confirm_window_ticks` re-latch delay on anything that was
+        genuinely still held, for no benefit.
+        """
+        self._trackers = {}
+        self._orientation = {}
+        for latch in self._latches.values():
+            latch.reset()
+        self._tick = 0
+        self.last_rgb_left = None
+        self.last_detections = {}
+        self.last_flange_poses = None
+        self.last_object_debug = {}
+        self.last_latch_results = {}
+        self.detector_ticked_last = False
+        self._events.clear()
+        self._prev_hand_closed = {}
+        self._prev_latch_state = {}
 
     @property
     def latches(self) -> dict[str, GraspLatch]:
@@ -277,6 +349,73 @@ class RelationPerception:
             return list(self._events)
         return [e for e in self._events if e["t"] > since_t]
 
+    def debug_snapshot(self, *, include_masks: bool | None = None) -> dict:
+        """JSON-safe perception debug state — everything `dashboard.py`'s
+        `encode_perception_frame()` draws from, serialized once HERE so a
+        recorder (`runner.py`'s per-tick drain) and any future consumer share
+        ONE definition of "the perception debug state" instead of each
+        re-deriving it from `last_detections`/`trackers`/`latches` themselves.
+
+        `include_masks`: masks are the only large field here (an (H, W)
+        bool array, PNG-encoded below) — defaults to `detector_ticked_last`
+        so a recorder logging this every tick doesn't re-encode/re-store the
+        SAME mask on every tick between detector refreshes; pass `True`/
+        `False` to override (e.g. a one-off snapshot always wants it).
+
+        Returns {"objects": {instance_id: {confidence, box_xyxy,
+        tracked_pose, last_accepted, detected_this_tick, tracked, depth_m,
+        mask_png_b64?}}, "hands": {hand: {state, latched_object,
+        rigid_pose}}}.
+        """
+        if include_masks is None:
+            include_masks = self.detector_ticked_last
+
+        objects: dict[str, dict] = {}
+        for oid, det in self.last_detections.items():
+            entry = {
+                "confidence": float(det.confidence),
+                "box_xyxy": None if det.box_xyxy is None
+                           else [float(x) for x in np.asarray(det.box_xyxy)],
+            }
+            if include_masks and det.mask is not None:
+                entry["mask_png_b64"] = _encode_mask_png(det.mask)
+            objects[oid] = entry
+        for oid, tracker in self.trackers.items():
+            entry = objects.setdefault(oid, {})
+            entry["tracked_pose"] = tracker.pose.tolist()
+            entry["last_accepted"] = bool(tracker.last_accepted)
+        # per-tick-precise fields (unlike the two loops above, which reflect
+        # whatever last refreshed at detector cadence and go stale between
+        # refreshes) -- ObjectDebug is recomputed fresh every observe() call.
+        for oid, debug in self.last_object_debug.items():
+            entry = objects.setdefault(oid, {})
+            entry["detected_this_tick"] = bool(debug.detected_this_tick)
+            entry["tracked"] = bool(debug.tracked)
+            entry["depth_m"] = None if debug.depth_m is None else float(debug.depth_m)
+
+        hands: dict[str, dict] = {}
+        for hand, latch in self.latches.items():
+            rigid = latch.rigid_pose
+            hands[hand] = {
+                "state": latch.state.value,
+                "latched_object": latch.latched_object,
+                "rigid_pose": None if rigid is None else rigid.tolist(),
+                # the commanded open/closed bit this tick (None before the
+                # first observe) — ui/telemetry.relation_panel reads it; a
+                # recording predating this field falls back to "any
+                # non-unlatched latch implies closed" there.
+                "hand_closed": self._prev_hand_closed.get(hand),
+            }
+        # candidate_object/reason/etc. live on the per-tick LatchResult
+        # (observe()'s return value), not on GraspLatch itself -- stashed at
+        # last_latch_results for exactly this reason.
+        for hand, result in self.last_latch_results.items():
+            entry = hands.setdefault(hand, {})
+            entry["candidate_object"] = result.candidate_object
+            entry["ticks_in_candidate"] = int(result.ticks_in_candidate)
+            entry["reason"] = result.reason
+        return {"objects": objects, "hands": hands}
+
     def observe(
         self,
         rgb_left: np.ndarray,
@@ -300,6 +439,16 @@ class RelationPerception:
         Returns {"state": (56,) float32, "objects": {instance_id:
         ObjectDebug}, "latch": {hand: LatchResult}}.
         """
+        # Dashboard-facing, EVERY tick (not gated by detector cadence like
+        # last_rgb_left/last_detections below): the FK anchor this same call
+        # composes model deltas onto, in the same pelvis frame the object
+        # trackers/latch report in. Lets a caller (dashboard.py) project the
+        # robot's OWN known wrist position through the camera calibration
+        # (T_pelvis_camera, K_left) as a hand-eye-calibration sanity check --
+        # "where the extrinsics say the wrist should appear" vs "where it
+        # visibly is" in the same overlay frame the detector/tracker draw on.
+        self.last_flange_poses = dict(flange_poses)
+
         run_detector_this_tick = self._tick % self._detector_period == 0
         if run_detector_this_tick:
             depth_map = self.depth_source.estimate(rgb_left, rgb_right)
@@ -311,7 +460,9 @@ class RelationPerception:
             # class docstring / __init__ comment).
             self.last_rgb_left = rgb_left
             self.last_detections = dict(detections)
+            self.detector_ticked_last = True
         else:
+            self.detector_ticked_last = False
             # Between detector refreshes: no new 2D/depth measurement at
             # all, for ANY object -- every object falls through to the
             # existing "not detected this tick" branch below, which already
@@ -419,6 +570,13 @@ class RelationPerception:
             dtype=np.float32,
         )
         state = np.concatenate([*blocks, grasp]).astype(np.float32)
+
+        # Dashboard/recorder-facing: debug_snapshot() reads this for the
+        # per-tick-precise detected_this_tick/tracked/depth_m fields (the
+        # per-tick truth, unlike last_detections/last_rgb_left above which
+        # only refresh on detector-cadence ticks and go stale otherwise).
+        self.last_object_debug = dict(object_debug)
+        self.last_latch_results = dict(latch_results)
 
         self._tick += 1
         return {"state": state, "objects": object_debug, "latch": latch_results}

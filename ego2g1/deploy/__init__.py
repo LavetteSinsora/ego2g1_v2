@@ -17,29 +17,40 @@ The design answers docs/jitter_root_cause.md point by point:
   * everything is RECORDED (`recorder`, events.jsonl) — the jitter was only
     diagnosable because the old deploy logged every seam.
 
-Module map (imports are kept lazy so joint-mode never touches mujoco and no
-module needs the robot to import):
+Package map (docs/deploy_refactor_plan.md §1 — the directory tree matches the
+semantic planes; imports are kept lazy so joint-mode never touches mujoco and
+no module needs the robot to import):
 
-  actions        the action-mode boundary: policy chunks (joint OR
-                 relative_eef) -> timestamped JOINT chunks. The one place the
-                 two modes differ.
+  core/          the mode-blind execution spine: runner (the 30 Hz step loop,
+                 precise_wait-paced, future-stamped), strategies (the five
+                 chunk consumers), session (ExecutorSession — the ONE road
+                 rows take to the executor: sanity + clamp + stamp + pace +
+                 damp-on-interrupt), safety, latency, executor (unitree_deploy
+                 wrapper + damp() e-stop + MockExecutor), kinematics, client,
+                 fast_crc
+  modes/         one DeployMode object per policy family (joint /
+                 relative_eef / relation_eef) — the observation shape, adapter
+                 wiring, hand bookkeeping, and per-mode telemetry/recorder
+                 extras. Adding a policy family = one file here.
+  actions        the action-mode boundary: policy chunks -> (H, 26) JOINT
+                 chunks (_EEFChunksBase + per-mode decode), model-space guards
   policy_adapter wraps the policy client so the runner only ever sees joint
                  chunks (ZH's adapter pattern; carries our RTC prefix contract)
-  strategies     the five chunk consumers (sync / naive-async / temporal
-                 ensembling / temporal smoothing / RTC), ported from
-                 zh_deploy_inference
-  runner         the 30 Hz step loop: obs -> strategy -> clamp -> executor,
-                 precise_wait-paced, future-stamped targets
-  executor       unitree_deploy wrapper (arm+Brainco) + damp() e-stop +
-                 MockExecutor for hardware-free tests
-  kinematics     FK anchors/state + the deploy IK (ego2g1.kin) with
-                 posture-tracks-last-solution
-  latency        DelayBudget + the startup latency self-check
-  safety         Clamp, Watchdog, action sanity checks
-  recorder       events.jsonl + mp4 session recording
-  client         websocket PolicyClient to `python -m ego2g1.serve`
-  camera         the single egocentric head camera (image_server ZMQ client)
-  check          the bring-up rung ladder — walk it in order
-  replay_dataset the hardware A/B: play a LeRobot dataset through the executor
-  replay_diag / measure_rate / sniff_lowcmd   transport + servo diagnostics
+  perception/    the relation_eef cascade: detector / depth / tracker / latch
+                 / relation_perception + the calibration solvers
+  record/        the recording contract: schema (event kinds + build_meta,
+                 the single source of truth), recorder (events.jsonl + mp4),
+                 session_reader (reconstruct any session at any t)
+  ui/            telemetry (TelemetrySnapshot — the page's ONE declared data
+                 shape) + overlay (the perception overlay renderer, fed the
+                 recorded `percept` shape), dashboard, replay_dashboard,
+                 perception_preview
+  tools/         the bring-up rung ladder (check — walk it in order), the
+                 replay tools (replay_dataset: the hardware A/B; replay_diag;
+                 replay_mujoco; replay_relation_openloop), and the wire
+                 diagnostics (measure_rate, sniff_lowcmd)
+  camera / remote_image_server / gripper_calib / _util   shared leaves
+
+Every documented `python -m ego2g1.deploy.<name>` entrypoint keeps working:
+the old flat module paths are shims onto the new locations.
 """

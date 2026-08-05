@@ -1,9 +1,9 @@
 """`runner.py`'s `relation_eef` wiring (docs/relation_deploy_plan.md §3/§5):
 
-  1. `_resolve_action_mode`'s "auto" branch selects `relation_eef` when the
+  1. `resolve_action_mode`'s (deploy/modes) "auto" branch selects `relation_eef` when the
      connected server advertises `control_mode == "relation_eef"`, alongside
      the existing joint/relative_eef cases (regression-checked too).
-  2. `_build_relation_adapter` fails loud, naming exactly which CLI flag is
+  2. `RelationEEFMode.build_adapter` fails loud, naming exactly which CLI flag is
      missing, if any of `--task-config`/`--stereo-calib`/`--camera-extrinsic`
      is absent when relation_eef mode is selected.
   3. An end-to-end `DeployRunner` rollout in relation_eef mode: real
@@ -30,7 +30,8 @@ from ego2g1.deploy.perception.detector import Detection, FakeDetector
 from ego2g1.deploy.perception.relation_perception import RelationPerception
 from ego2g1.deploy.perception.task_config import DeployTaskConfig, ObjectSpec
 from ego2g1.deploy.policy_adapter import RelationPolicyAdapter
-from ego2g1.deploy.runner import DeployRunner, _build_relation_adapter, _resolve_action_mode
+from ego2g1.deploy.modes import get as get_mode, resolve_action_mode
+from ego2g1.deploy.runner import DeployRunner
 from ego2g1.deploy.strategies import SynchronousStrategy
 
 FPS = 30
@@ -43,22 +44,22 @@ NO_WAIT = lambda t_end, **kw: None  # noqa: E731
 
 
 def test_resolve_action_mode_selects_relation_eef_from_server_control_mode():
-    assert _resolve_action_mode("auto", "relation_eef") == "relation_eef"
+    assert resolve_action_mode("auto", "relation_eef") == "relation_eef"
 
 
 def test_resolve_action_mode_still_selects_joint_and_relative_eef():
-    assert _resolve_action_mode("auto", "joint") == "joint"
-    assert _resolve_action_mode("auto", "relative_eef") == "relative_eef"
+    assert resolve_action_mode("auto", "joint") == "joint"
+    assert resolve_action_mode("auto", "relative_eef") == "relative_eef"
     # anything else (a future/unknown control_mode) falls back to
     # relative_eef, exactly the original two-way ternary's behavior
-    assert _resolve_action_mode("auto", "something_未来") == "relative_eef"
+    assert resolve_action_mode("auto", "something_未来") == "relative_eef"
 
 
 def test_resolve_action_mode_explicit_override_passes_through():
     # an explicit override is for deliberately testing a mismatched pairing
     # -- it must NOT be overridden by the server's advertised control_mode
-    assert _resolve_action_mode("joint", "relation_eef") == "joint"
-    assert _resolve_action_mode("relative_eef", "relation_eef") == "relative_eef"
+    assert resolve_action_mode("joint", "relation_eef") == "joint"
+    assert resolve_action_mode("relative_eef", "relation_eef") == "relative_eef"
 
 
 # --------------------------------------------------------------------------
@@ -67,7 +68,7 @@ def test_resolve_action_mode_explicit_override_passes_through():
 
 
 class _ArgsStub:
-    """Only the fields `_build_relation_adapter` actually reads -- avoids
+    """Only the fields `RelationEEFMode.build_adapter` actually reads -- avoids
     depending on tyro/the full `Args` dataclass's unrelated defaults."""
 
     def __init__(self, *, task_config=None, stereo_calib=None, camera_extrinsic=None):
@@ -84,27 +85,27 @@ def test_missing_task_config_fails_loud(tmp_path):
     args = _ArgsStub(stereo_calib=str(tmp_path / "c.npz"),
                      camera_extrinsic=str(tmp_path / "e.npz"))
     with pytest.raises(ValueError, match=r"--task-config"):
-        _build_relation_adapter(args, client=object(), fps=FPS)
+        get_mode("relation_eef").build_adapter(client=object(), args=args, fps=FPS)
 
 
 def test_missing_stereo_calib_fails_loud(tmp_path):
     args = _ArgsStub(task_config=str(tmp_path / "t.yaml"),
                      camera_extrinsic=str(tmp_path / "e.npz"))
     with pytest.raises(ValueError, match=r"--stereo-calib"):
-        _build_relation_adapter(args, client=object(), fps=FPS)
+        get_mode("relation_eef").build_adapter(client=object(), args=args, fps=FPS)
 
 
 def test_missing_camera_extrinsic_fails_loud(tmp_path):
     args = _ArgsStub(task_config=str(tmp_path / "t.yaml"),
                      stereo_calib=str(tmp_path / "c.npz"))
     with pytest.raises(ValueError, match=r"--camera-extrinsic"):
-        _build_relation_adapter(args, client=object(), fps=FPS)
+        get_mode("relation_eef").build_adapter(client=object(), args=args, fps=FPS)
 
 
 def test_all_three_missing_names_all_three_flags():
     args = _ArgsStub()
     with pytest.raises(ValueError) as exc_info:
-        _build_relation_adapter(args, client=object(), fps=FPS)
+        get_mode("relation_eef").build_adapter(client=object(), args=args, fps=FPS)
     msg = str(exc_info.value)
     assert "--task-config" in msg
     assert "--stereo-calib" in msg
@@ -206,7 +207,7 @@ def test_deploy_runner_relation_eef_end_to_end(kin_smooth):
     strategy = SynchronousStrategy(adapter, chunk_size=client.action_horizon)
     runner = DeployRunner(adapter=adapter, strategy=strategy, executor=executor,
                           camera=cam, fps=FPS, wait=NO_WAIT,
-                          relation_mode=True, max_steps=8)
+                          mode="relation_eef", max_steps=8)
 
     runner.run()
 
@@ -250,7 +251,7 @@ def test_deploy_runner_relation_eef_last_hands_starts_open_scalar():
     executor.connect()
     runner = DeployRunner(
         adapter=object(), strategy=object(), executor=executor,
-        fps=FPS, wait=NO_WAIT, relation_mode=True)
+        fps=FPS, wait=NO_WAIT, mode="relation_eef")
     assert runner.last_hands == {"left": 0.0, "right": 0.0}
     for h in relation_layout.HANDS:
         assert isinstance(runner.last_hands[h], float)
@@ -283,7 +284,7 @@ def test_telemetry_relation_field_after_relation_eef_run(kin_smooth):
     strategy = SynchronousStrategy(adapter, chunk_size=client.action_horizon)
     runner = DeployRunner(adapter=adapter, strategy=strategy, executor=executor,
                           camera=cam, fps=FPS, wait=NO_WAIT,
-                          relation_mode=True, max_steps=8)
+                          mode="relation_eef", max_steps=8)
     runner.run()
 
     t = runner.telemetry()
@@ -317,7 +318,7 @@ def test_telemetry_relation_is_none_outside_relation_mode():
     executor.connect()
     runner = DeployRunner(
         adapter=object(), strategy=object(), executor=executor,
-        fps=FPS, wait=NO_WAIT, relation_mode=False)
+        fps=FPS, wait=NO_WAIT, mode="joint")
     assert runner.telemetry()["relation"] is None
 
 
@@ -326,7 +327,7 @@ def test_reset_to_episode_refuses_in_relation_mode():
     executor.connect()
     runner = DeployRunner(
         adapter=object(), strategy=object(), executor=executor,
-        fps=FPS, wait=NO_WAIT, relation_mode=True, dataset="fake://dataset",
+        fps=FPS, wait=NO_WAIT, mode="relation_eef", dataset="fake://dataset",
         gated=True)
     with pytest.raises(NotImplementedError, match="relation_eef"):
         runner.reset_to_episode(0)
