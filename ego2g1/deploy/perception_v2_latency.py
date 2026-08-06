@@ -44,34 +44,54 @@ produces numbers that look fine and are wrong by 2-10x:
      averaged in.
 
 --------------------------------------------------------------------------
-SETUP
+RUNNING IT
 --------------------------------------------------------------------------
 
-SAM 3 checkpoints are GATED. Request access, then authenticate, or every
-`from_pretrained` below 401s:
+    uv run python -m ego2g1.deploy.perception_v2_latency
 
-    # 1. Request access (once, in a browser):
-    #      https://huggingface.co/facebook/sam3
-    # 2. Authenticate:
-    hf auth login
-    # 3. Pre-download so the benchmark doesn't time the download:
-    hf download facebook/sam3
+That is the whole invocation. No flags, nothing to clone or download by hand.
+Everything else in this section is what the script does FOR you, documented so
+that when a step fails you know which one it was.
 
-SAM 3 needs a recent transformers (the sam3 / sam3_video model classes landed
-in v5.x). Into the deploy dep group:
+Defaults are baked in from the repo, not invented:
 
-    uv pip install -U 'transformers>=5.10' torch torchvision
+    --stereo-calib   <repo>/stereo_calib.npz      if present, else a sized
+                                                  placeholder (compute cost is
+                                                  right, depth VALUES are not)
+    --oriany-repo    <repo>/third_party/Orient-Anything-V2   (auto-cloned)
+    --oriany-ckpt    auto-fetched from the Hub    (~5 GB, cached)
+    --camera-host    EGO2G1_CAMERA_HOST or the lab default
 
-Orient Anything V2 is a GitHub repo, not a pip package -- it is imported by
-path, not by name. Clone it and pass --oriany-repo:
+Auto-setup, all skipped when already satisfied, all disable-able with
+--no-auto-download:
 
-    git clone https://github.com/SpatialVision/Orient-Anything-V2 third_party/Orient-Anything-V2
-    hf download Viglong/OriAnyV2_ckpt      # ~5.05 GB, see the VRAM note below
+  * Orient Anything V2 is a GitHub repo, not a pip package -- it is imported
+    by PATH. `git clone --depth 1` into third_party/ on first run. Its vendored
+    `vggt/` package comes with it, which is why cloning is enough.
+  * Its checkpoint lives at `demo_ckpts/rotmod_realrotaug_best.pt` inside
+    `Viglong/OriAnyV2_ckpt` (NOT at the repo root -- that path 404s). Public,
+    so no auth needed. ~5 GB, downloaded once into the HF cache.
+  * `utils/app_utils.py` does `import rembg` at module scope, so importing it
+    at all requires rembg installed even though we never want to run it. If
+    rembg is absent, a stub is injected into sys.modules that raises only if
+    something actually calls it. `--measure-rembg` needs the real one.
+  * SAM 3 weights are pre-fetched via `snapshot_download` during preflight,
+    rather than lazily inside a timed stage, so a slow network never lands in
+    a latency number.
 
-If --oriany-repo is not given, the orientation stage is SKIPPED and every
-other stage still reports. That is deliberate: the SAM 3 and SGBM numbers are
-what gate the 10 Hz loop, and you should be able to get them without first
-resolving a 5 GB third-party checkpoint.
+We deliberately do NOT `pip install -r` Orient Anything V2's requirements.txt.
+It pins `gradio==5.9.0`, `pydantic==2.10.6`, `lightning==2.2` and `bpy==4.2`
+(Blender, hundreds of MB) -- installing that into this project's environment
+would be destructive and none of it is needed for a forward pass.
+
+THE ONE STEP THAT CANNOT BE AUTOMATED: `facebook/sam3` is `gated: manual` on
+the Hub -- a human has to approve your access request. Preflight detects this
+and prints the exact two steps. Everything else is automatic.
+
+If the orientation stage cannot be set up, it is SKIPPED and every other stage
+still reports. The SAM 3 and SGBM numbers are what gate the 10 Hz loop, and
+you should be able to get them without first resolving a 5 GB third-party
+checkpoint.
 
 --------------------------------------------------------------------------
 A NOTE ON VRAM, AND ON WHICH GPU THIS IS
@@ -110,6 +130,152 @@ _DEFAULT_PROMPTS = "cup,bowl,plate"
 # speed lever and is measured alongside it by --also-560, at an accuracy cost
 # nothing in this script quantifies.
 _NATIVE_IMAGE_SIZE = 1008
+
+
+_ORIANY_GIT = "https://github.com/SpatialVision/Orient-Anything-V2"
+_ORIANY_HF_REPO = "Viglong/OriAnyV2_ckpt"
+# NOTE the subdirectory. The checkpoint is NOT at the repo root; asking for a
+# bare "rotmod_realrotaug_best.pt" 404s.
+_ORIANY_HF_FILE = "demo_ckpts/rotmod_realrotaug_best.pt"
+_SAM3_REPO = "facebook/sam3"
+
+
+# ----------------------------------------------------------------------------
+# auto-setup: everything needed to run with zero arguments
+# ----------------------------------------------------------------------------
+
+def _repo_root() -> Path:
+    """<root>/ego2g1/deploy/perception_v2_latency.py -> <root>."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _default_stereo_calib() -> str | None:
+    p = _repo_root() / "stereo_calib.npz"
+    return str(p) if p.is_file() else None
+
+
+def _default_oriany_repo() -> Path:
+    return _repo_root() / "third_party" / "Orient-Anything-V2"
+
+
+def _ensure_oriany_repo(path: Path, *, auto: bool) -> Path | None:
+    """Clone Orient Anything V2 if absent. Returns the path, or None if the
+    orientation stage cannot run (which is survivable -- every other stage
+    still reports)."""
+    import subprocess
+    path = Path(path).expanduser()
+    if (path / "vision_tower.py").is_file():
+        return path
+    if path.exists() and any(path.iterdir()):
+        print(f"[setup] {path} exists but has no vision_tower.py -- not "
+              f"touching it. Remove it or pass --oriany-repo elsewhere.")
+        return None
+    if not auto:
+        print(f"[setup] Orient Anything V2 not at {path} and --no-auto-download "
+              f"is set; skipping the orientation stage.")
+        return None
+    print(f"[setup] cloning Orient Anything V2 -> {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(["git", "clone", "--depth", "1", _ORIANY_GIT, str(path)],
+                       check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        print(f"[setup] clone failed ({exc}); skipping the orientation stage. "
+              f"Clone it by hand and re-run:\n    git clone --depth 1 "
+              f"{_ORIANY_GIT} {path}")
+        return None
+    return path if (path / "vision_tower.py").is_file() else None
+
+
+def _ensure_oriany_ckpt(explicit: str | None, *, auto: bool) -> str | None:
+    """Fetch the ~5 GB checkpoint into the HF cache. Public repo, no auth."""
+    if explicit:
+        return explicit
+    if not auto:
+        return None
+    from huggingface_hub import hf_hub_download
+    print(f"[setup] resolving {_ORIANY_HF_REPO}/{_ORIANY_HF_FILE} "
+          f"(~5 GB, cached after the first run)")
+    try:
+        return hf_hub_download(_ORIANY_HF_REPO, _ORIANY_HF_FILE)
+    except Exception as exc:                       # noqa: BLE001
+        print(f"[setup] checkpoint download failed: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _stub_rembg_if_missing(*, want_rembg: bool) -> None:
+    """`utils/app_utils.py` does `import rembg` at module scope, so we cannot
+    import ANY of its helpers without rembg present -- even though the whole
+    point is that we never run it (we have a SAM 3 mask, which is better
+    information than rembg's guess).
+
+    Install a stub that satisfies the import and raises only if something
+    actually calls it. Real rembg is left alone when present, and is required
+    for --measure-rembg.
+    """
+    import types
+    try:
+        import rembg                                # noqa: F401
+        return
+    except ImportError:
+        pass
+    if want_rembg:
+        print("[setup] --measure-rembg needs the real rembg: "
+              "`uv pip install rembg onnxruntime`. Continuing without it.")
+
+    def _unavailable(*_a, **_k):
+        raise RuntimeError(
+            "rembg is not installed. It is deliberately unnecessary here -- we "
+            "crop from the SAM 3 mask instead. Install it only for "
+            "--measure-rembg.")
+
+    stub = types.ModuleType("rembg")
+    stub.remove = _unavailable
+    stub.new_session = _unavailable
+    sys.modules["rembg"] = stub
+    print("[setup] rembg absent -> stub installed (import-only; never called)")
+
+
+def _preflight(*, sam3_repo: str, auto: bool) -> bool:
+    """Verify and pre-fetch everything the SAM 3 stages need. Returns False if they
+    cannot run, having already printed what to do about it."""
+    ok = True
+    try:
+        import transformers
+    except ImportError:
+        print("[setup] transformers is not installed:\n"
+              "    uv pip install -U 'transformers>=5'")
+        return False
+    if not hasattr(transformers, "Sam3Model"):
+        print(f"[setup] transformers {transformers.__version__} has no "
+              f"Sam3Model -- SAM 3 landed in v5.0.0:\n"
+              f"    uv pip install -U 'transformers>=5'")
+        ok = False
+
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import GatedRepoError
+    try:
+        if auto:
+            print(f"[setup] pre-fetching {sam3_repo} (cached after first run; "
+                  f"done here so a slow network never lands in a timed stage)")
+            snapshot_download(sam3_repo)
+    except GatedRepoError:
+        print(f"\n[setup] {sam3_repo} is GATED and your account has no access.\n"
+              f"        This is the ONE step that cannot be automated:\n"
+              f"          1. open https://huggingface.co/{sam3_repo} and click "
+              f"'Request access'\n"
+              f"          2. once approved:  hf auth login\n"
+              f"        Then re-run this script.")
+        return False
+    except Exception as exc:                       # noqa: BLE001
+        name = type(exc).__name__
+        if "401" in str(exc) or "Unauthorized" in name or "Token" in name:
+            print(f"\n[setup] not authenticated to the Hub. Run:  hf auth login"
+                  f"\n        (and make sure you have access to {sam3_repo})")
+            return False
+        print(f"[setup] pre-fetch of {sam3_repo} failed ({name}: {exc}); "
+              f"continuing -- from_pretrained will retry.")
+    return ok
 
 
 # ----------------------------------------------------------------------------
@@ -159,6 +325,19 @@ def _time_calls(fn, *, n: int, warmup: int, device: str,
         last_error = err or last_error
         samples.append(dt)
     return warmup_samples, samples, last_error
+
+
+def _quiet(fn, *args, **kwargs):
+    """Call `fn` with stdout swallowed.
+
+    Orient Anything V2's `inf_single_batch` has a bare `print(ans_dict)` in it.
+    Left alone that prints once per crop per iteration -- hundreds of lines of
+    noise, and terminal I/O charged to the stage being timed.
+    """
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(*args, **kwargs)
 
 
 def _report_stage(name: str, warmup_s, samples_s, error, *,
@@ -440,40 +619,92 @@ class Sam3TrackPCS:
 
 
 class OrientAnythingV2:
-    """S6 -- orientation from a masked crop.
+    """S6 -- orientation from a masked crop. VGGT-based; 5.05 GB checkpoint.
 
-    Imported BY PATH, not by name: upstream is a research repo exposing
-    `vision_tower.VGGT_OriAny_Ref`, not a pip package. Its public inference
-    entry is `inf_single_case(model, pil_ref, pil_tgt)` -- ONE CASE AT A TIME.
-    There is no documented batched-crops API, so the loop below is sequential
-    by necessity, not by choice. If you find a batched path, measure it here
-    before assuming it helps: the batching win asserted in
-    docs/perception_v2_pipeline.md S6 is currently UNVERIFIED and this stage
-    is the place that would falsify it.
+    Imported BY PATH, not by name: upstream is a research repo, not a pip
+    package. There is no `inference.py` at the root -- the real entry points
+    live in `utils/app_utils.py` and are driven by `app.py` (a Gradio demo).
+
+    FOUR THINGS THE STOCK PATH DOES THAT WE SHOULD NOT PAY FOR AT 1 Hz, each
+    measured separately below so the saving is a number and not a claim:
+
+      1. `inf_single_case(model, ref, tgt)` stacks [ref, tgt] into an S=2
+         sequence. Passing the SAME crop twice (the obvious way to ask for
+         absolute orientation) pushes two images through VGGT for one answer
+         -- about 2x the work for nothing. `tgt=None` gives the S=1 path.
+         Use `mode="absolute"`.
+
+      2. `inf_single_batch` takes `(B, S, C, H, W)` and its forward handles
+         B > 1 fine -- only the output unpacking is hardcoded to B=1 (the
+         `S == 1` branch indexes `[0]` and discards the rest of the batch).
+         So true batching over our N crops IS available; it just needs ~10
+         lines of unpacking rather than the public helper. `mode="batched"`.
+         (This corrects an earlier reading of the docs, which document no
+         batched entry point. The capability is there; only the wrapper is
+         single-case.)
+
+      3. `val_fit_alpha` runs a scipy distribution fit over the 360-bin
+         azimuth histogram on EVERY call, to recover the symmetry parameter.
+         We need alpha once, at seed, to choose the symmetry group for the
+         episode -- not at 1 Hz forever. `--orient-skip-alpha` measures the
+         path without it.
+
+      4. `background_preprocess` runs **rembg** (a separate U2-Net matting
+         model) and calls `rembg.new_session()` INSIDE the function, i.e.
+         re-creates the session on every invocation. We already have a SAM 3
+         mask, which is strictly better information than rembg's guess, so
+         this should never run in the deploy loop. Measured only to show what
+         it would have cost.
+
+    Preprocessing is 518x518 pad mode (DINOv2 patch-14 grid), so crop size
+    barely matters to cost -- everything is resized to the same tensor.
     """
 
-    def __init__(self, repo_dir: str, ckpt: str | None, device: str, dtype):
+    TARGET = 518
+
+    def __init__(self, repo_dir: str, ckpt: str | None, device: str,
+                 dtype=None):
         import torch
         repo = Path(repo_dir).expanduser().resolve()
         if not repo.is_dir():
             raise FileNotFoundError(f"--oriany-repo not a directory: {repo}")
         sys.path.insert(0, str(repo))
-        from vision_tower import VGGT_OriAny_Ref          # noqa: E402
-        from inference import inf_single_case             # noqa: E402
+        from vision_tower import VGGT_OriAny_Ref                     # noqa: E402
+        from utils.app_utils import (background_preprocess,          # noqa: E402
+                                     inf_single_case, preprocess_images)
+        try:
+            from utils.app_utils import val_fit_alpha                # noqa: E402
+        except ImportError:
+            val_fit_alpha = None
+
+        # Upstream's own dtype rule (app.py): bf16 on sm_80+, else fp16.
+        # Ada (4060/4090, sm_89) takes the bf16 branch.
+        if dtype is None:
+            dtype = (torch.bfloat16
+                     if torch.cuda.is_available()
+                     and torch.cuda.get_device_capability()[0] >= 8
+                     else torch.float16)
         if ckpt is None:
             from huggingface_hub import hf_hub_download
-            ckpt = hf_hub_download("Viglong/OriAnyV2_ckpt",
-                                   "rotmod_realrotaug_best.pt")
+            ckpt = hf_hub_download(_ORIANY_HF_REPO, _ORIANY_HF_FILE)
         self.model = VGGT_OriAny_Ref(out_dim=900, dtype=dtype, nopretrain=True)
         self.model.load_state_dict(torch.load(ckpt, map_location="cpu"))
         self.model = self.model.to(device).eval()
-        self._inf = inf_single_case
+
+        self.torch = torch
+        self.device = device
+        self._inf_single = inf_single_case
+        self._preprocess = preprocess_images
+        self._bkg = background_preprocess
+        self._val_fit_alpha = val_fit_alpha
+
+    # -- crop ---------------------------------------------------------------
 
     @staticmethod
     def crop(rgb, mask, *, pad: float = 0.15):
-        """Square, padded crop around the mask bbox. Square because the model
-        takes single-object images and a non-square resize would shear the
-        object's apparent orientation -- the one thing we are measuring."""
+        """Square, padded crop around the mask bbox. Square because a
+        non-square resize would shear the object's apparent orientation --
+        the one thing this stage exists to measure."""
         from PIL import Image
         ys, xs = np.nonzero(mask)
         if len(xs) == 0:
@@ -488,8 +719,50 @@ class OrientAnythingV2:
             return None
         return Image.fromarray(rgb[y0:y1, x0:x1]).convert("RGB")
 
-    def __call__(self, crops):
-        return [self._inf(self.model, c, c) for c in crops if c is not None]
+    # -- inference modes ----------------------------------------------------
+
+    def absolute_sequential(self, crops):
+        """Stock path, one crop at a time, S=1 (tgt=None -- NOT the same crop
+        twice). This is the honest baseline for 'what does the public API
+        cost'."""
+        return [self._inf_single(self.model, c, None) for c in crops]
+
+    def absolute_batched(self, crops, *, with_alpha: bool = False):
+        """All N crops in ONE forward. (B, S=1, C, 518, 518).
+
+        Reimplements `inf_single_batch`'s unpacking because that function's
+        S==1 branch keeps only element [0]. The angle decode below is
+        line-for-line the same arithmetic, minus the B=1 assumption.
+        """
+        torch = self.torch
+        # preprocess_images returns (N, C, H, W) for a list of N images;
+        # unsqueeze(1) makes each its own S=1 sequence -> (N, 1, C, H, W).
+        t = self._preprocess(list(crops), mode="pad").to(self.model.get_device())
+        batch = t.unsqueeze(1)
+        with torch.no_grad():
+            pose_enc = self.model(batch)                    # (B, S, D)
+        pose_enc = pose_enc.view(pose_enc.shape[0] * pose_enc.shape[1], -1)
+        az = torch.argmax(pose_enc[:, 0:360], dim=-1)
+        el = torch.argmax(pose_enc[:, 360:540], dim=-1) - 90
+        ro = torch.argmax(pose_enc[:, 540:900], dim=-1) - 180
+        out = {"az": az, "el": el, "ro": ro}
+        if with_alpha and self._val_fit_alpha is not None:
+            import torch.nn.functional as F
+            dist = F.sigmoid(pose_enc[:, 0:360]).cpu().float().numpy()
+            out["alpha"] = self._val_fit_alpha(distribute=dist)
+        return out
+
+    def relative(self, ref_crops, tgt_crops):
+        """S=2 relative-rotation mode: rotation of tgt w.r.t. ref. The
+        alternative to re-estimating absolute orientation every tick --
+        estimate once at seed, then track relative rotation. Costs ~2 images
+        per case, so it is only a win if it lets you skip something else."""
+        return [self._inf_single(self.model, r, t)
+                for r, t in zip(ref_crops, tgt_crops)]
+
+    def rembg_preprocess(self, crops):
+        """Measured to justify NOT using it -- see class docstring item 4."""
+        return [self._bkg(c, True) for c in crops]
 
     def free(self):
         del self.model
@@ -520,18 +793,19 @@ def _parallel(gpu_fn, cpu_fn):
 
 def main(
     *,
-    camera_host: str = "192.168.123.164",
+    camera_host: str | None = None,
     fake_camera: bool = False,
     fake_width: int = 640,
     fake_height: int = 480,
     prompts: str = _DEFAULT_PROMPTS,
     stereo_calib: str | None = None,
-    sam3_repo: str = "facebook/sam3",
+    sam3_repo: str = _SAM3_REPO,
     oriany_repo: str | None = None,
     oriany_ckpt: str | None = None,
     device: str | None = None,
     dtype: str = "bfloat16",
     n: int = 30,
+    measure_rembg: bool = False,
     warmup: int = 5,
     track_frames: int = 300,
     also_560: bool = False,
@@ -539,6 +813,7 @@ def main(
     sequential_load: bool = False,
     policy_period_ms: float = 1000.0,
     tracker_hz: float = 10.0,
+    auto_download: bool = True,
 ):
     """Measure every v2 perception stage on THIS machine.
 
@@ -550,6 +825,28 @@ def main(
         small card produce per-stage numbers; disables the composites, which
         need the models co-resident.
     """
+    # ---- auto-setup, before any model touches the GPU ----------------------
+    _stub_rembg_if_missing(want_rembg=measure_rembg)
+    if not _preflight(sam3_repo=sam3_repo, auto=auto_download):
+        print("\nAborting: the SAM 3 stages cannot run. See above.")
+        return
+    if oriany_repo is None:
+        oriany_repo = _default_oriany_repo()
+    resolved_oriany = _ensure_oriany_repo(Path(oriany_repo), auto=auto_download)
+    if resolved_oriany is not None and oriany_ckpt is None:
+        oriany_ckpt = _ensure_oriany_ckpt(None, auto=auto_download)
+        if oriany_ckpt is None:
+            resolved_oriany = None
+    oriany_repo = str(resolved_oriany) if resolved_oriany else None
+
+    if stereo_calib is None:
+        stereo_calib = _default_stereo_calib()
+        if stereo_calib:
+            print(f"[setup] stereo calibration: {stereo_calib}")
+    if camera_host is None:
+        import os
+        camera_host = os.environ.get("EGO2G1_CAMERA_HOST", "192.168.123.164")
+
     import torch
 
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -671,32 +968,113 @@ def main(
     results["join"] = _report_stage("S3 join  (CPU)", w, s, e)
 
     # ---- S6 orientation (GPU) ---------------------------------------------
+    # Five variants, because "the orientation model's latency" is not one
+    # number -- the stock path does several things we can skip, and each
+    # skip needs a measurement to justify it (see OrientAnythingV2's docstring).
     orient = None
     if oriany_repo:
         _vram_reset(dev)
         try:
-            orient = OrientAnythingV2(oriany_repo, oriany_ckpt, dev, torch_dtype)
+            t_load = time.perf_counter()
+            orient = OrientAnythingV2(oriany_repo, oriany_ckpt, dev)
+            _sync(dev)
+            load_s = time.perf_counter() - t_load
+            print(f"\n--- S6 orient: model load ---")
+            print(f"  {load_s:.1f} s to load + upload (5.05 GB checkpoint). "
+                  f"Cold-start cost, paid once.")
+            print(f"  vram after load: {_vram_peak_mb(dev):.0f} MB")
+
             crops = [c for c in (OrientAnythingV2.crop(rgb_left, m) for m in masks)
                      if c is not None]
-            if crops:
-                w, s, e = _time_calls(lambda: orient(crops), n=max(5, n // 3),
-                                      warmup=warmup, device=dev)
-                results["orient"] = _report_stage(
-                    f"S6 orient  (GPU, 1 Hz, {len(crops)} crops, SEQUENTIAL)",
-                    w, s, e, vram_mb=_vram_peak_mb(dev))
-                w1, s1, e1 = _time_calls(lambda: orient(crops[:1]),
-                                         n=max(5, n // 3), warmup=2, device=dev)
-                per1 = _report_stage("S6 orient  (1 crop, for per-crop scaling)",
-                                     w1, s1, e1)
-                print(f"  -> {results['orient'] / per1:.1f}x for {len(crops)} crops "
-                      f"vs 1. Near-linear means no batching win is available "
-                      f"through the public API.")
+            nc = len(crops)
+            if not crops:
+                print("\n--- S6 orient --- skipped: no usable crops (no masks). "
+                      "Point the camera at the --prompts objects.")
             else:
-                print("\n--- S6 orient --- skipped: no usable crops (no masks)")
+                nn = max(5, n // 3)
+
+                # (a) stock public path, one case at a time, S=1
+                _vram_reset(dev)
+                w, s, e = _time_calls(
+                    lambda: _quiet(orient.absolute_sequential, crops),
+                    n=nn, warmup=warmup, device=dev)
+                seq = _report_stage(
+                    f"S6a orient  sequential, {nc} crops, S=1  [stock API]",
+                    w, s, e, vram_mb=_vram_peak_mb(dev))
+                results["orient"] = seq
+
+                # (b) one crop, to expose per-crop scaling
+                w, s, e = _time_calls(
+                    lambda: _quiet(orient.absolute_sequential, crops[:1]),
+                    n=nn, warmup=2, device=dev)
+                one = _report_stage("S6b orient  sequential, 1 crop", w, s, e)
+
+                # (c) all crops in ONE forward -- the finding this stage exists
+                #     to confirm or kill
+                _vram_reset(dev)
+                w, s, e = _time_calls(lambda: orient.absolute_batched(crops),
+                                      n=nn, warmup=warmup, device=dev)
+                bat = _report_stage(
+                    f"S6c orient  BATCHED, {nc} crops in one forward",
+                    w, s, e, vram_mb=_vram_peak_mb(dev))
+                results["orient_batched"] = bat
+
+                if not (np.isnan(seq) or np.isnan(bat)):
+                    print(f"\n  scaling: 1 crop {one:.0f} ms -> {nc} sequential "
+                          f"{seq:.0f} ms ({seq / max(one, 1e-9):.1f}x)  vs  "
+                          f"{nc} batched {bat:.0f} ms "
+                          f"({bat / max(one, 1e-9):.1f}x)")
+                    if bat < 0.8 * seq:
+                        print(f"  -> batching saves {seq - bat:.0f} ms "
+                              f"({100 * (seq - bat) / seq:.0f}%). Worth the ~10 "
+                              f"lines of custom unpacking; use absolute_batched.")
+                    else:
+                        print("  -> batching does NOT help here (likely "
+                              "compute-bound, not launch-bound at this size). "
+                              "Stay on the stock API and keep the code simpler.")
+                    results["orient"] = min(seq, bat)
+
+                # (d) cost of val_fit_alpha, which we only need at seed
+                w, s, e = _time_calls(
+                    lambda: orient.absolute_batched(crops, with_alpha=True),
+                    n=nn, warmup=2, device=dev)
+                alpha = _report_stage(
+                    "S6d orient  batched + val_fit_alpha (scipy, CPU)", w, s, e)
+                if not (np.isnan(alpha) or np.isnan(bat)):
+                    print(f"  -> alpha costs {alpha - bat:.0f} ms per call. We "
+                          f"need it ONCE at seed to fix the episode's symmetry "
+                          f"group, never at 1 Hz. Skip it in the loop.")
+
+                # (e) relative (S=2) mode -- the seed-once-then-track option
+                w, s, e = _time_calls(
+                    lambda: _quiet(orient.relative, crops, crops),
+                    n=nn, warmup=2, device=dev)
+                rel = _report_stage(
+                    f"S6e orient  RELATIVE mode, {nc} pairs, S=2", w, s, e)
+                if not (np.isnan(rel) or np.isnan(seq)):
+                    print(f"  -> {rel / max(seq, 1e-9):.1f}x the absolute S=1 "
+                          f"path (two images per case). Only worth it if "
+                          f"tracking relative rotation lets you drop something "
+                          f"else -- it is not a speed win by itself.")
+
+                # (f) what rembg would have cost, had we not had SAM 3 masks
+                if measure_rembg:
+                    w, s, e = _time_calls(
+                        lambda: orient.rembg_preprocess(crops),
+                        n=3, warmup=1, device="cpu")
+                    rb = _report_stage(
+                        "S6f orient  background_preprocess (rembg) -- NOT USED",
+                        w, s, e)
+                    print(f"  -> {rb:.0f} ms of U2-Net matting per call, plus a "
+                          f"fresh rembg session per call. We already have a SAM 3 "
+                          f"mask, which is better information. Never enable this "
+                          f"in the deploy loop.")
         except Exception as exc:                    # noqa: BLE001
-            print(f"\n--- S6 orient --- FAILED to load: "
-                  f"{type(exc).__name__}: {exc}")
+            import traceback
+            print(f"\n--- S6 orient --- FAILED: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
             print("  every other stage above is still valid.")
+            orient = None
     else:
         print("\n--- S6 orient --- skipped: pass --oriany-repo to measure it")
 
@@ -729,7 +1107,7 @@ def main(
                 c = [x for x in (OrientAnythingV2.crop(rgb_left, mm) for mm in m)
                      if x is not None]
                 if c:
-                    orient(c)
+                    orient.absolute_batched(c)
 
             w, s, e = _time_calls(lambda: _parallel(with_orient, cpu_step),
                                   n=max(5, n // 3), warmup=3, device=dev)

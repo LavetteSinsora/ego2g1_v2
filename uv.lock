@@ -3,16 +3,23 @@ revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
+conflicts = [[
+    { package = "ego2g1", group = "perception" },
+    { package = "ego2g1", group = "perception-v2" },
+], [
+    { package = "ego2g1", group = "perception-v2" },
+    { package = "ego2g1", group = "train" },
+]]
 
 [[package]]
 name = "absl-py"
@@ -28,13 +35,14 @@ name = "accelerate"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "numpy", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "packaging", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "psutil", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "pyyaml", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "safetensors", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "torch", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8d/75/94cd5d389649578aca399e5aa822637eec18319a1dadc400ffe2f9a7493f/accelerate-1.14.0.tar.gz", hash = "sha256:41b9c4377a54e0b460a959b0defa1b736e4ca0a2373252d9a539964c2afe3c8d", size = 412167, upload-time = "2026-06-11T13:45:52.326Z" }
 wheels = [
@@ -119,6 +127,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl", hash = "sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e", size = 7490, upload-time = "2025-07-03T22:54:42.156Z" },
+]
+
+[[package]]
+name = "annotated-doc"
+version = "0.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/8e/38aa427ed5402449e226975b649c5dc73ccadfefeb95e6aecb8f8ea4b6b6/annotated_doc-0.0.5.tar.gz", hash = "sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb", size = 10758, upload-time = "2026-07-28T13:50:58.129Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl", hash = "sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101", size = 5302, upload-time = "2026-07-28T13:50:57.239Z" },
 ]
 
 [[package]]
@@ -366,7 +383,7 @@ name = "cffi"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/57/5f/ff100cae70ebe9d8df1c01a00e510e45d9adb5c1fdda84791b199141de97/cffi-2.1.0.tar.gz", hash = "sha256:efc1cdd798b1aaf39b4610bba7aad28c9bea9b910f25c784ccf9ec1fa719d1f9", size = 531036, upload-time = "2026-07-06T21:34:30.382Z" }
 wheels = [
@@ -455,7 +472,7 @@ name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/d4/81420972a676e8ffea40450d8c8c92943e7218a78fe9b64359836cc9876b/click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6", size = 338000, upload-time = "2026-06-24T17:45:15.148Z" }
 wheels = [
@@ -681,7 +698,7 @@ name = "cryptography"
 version = "49.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1f/99/d1c90d6041656cc6ee229dc99cd67fd0cd5aec3c5f7d72fffc27cc750054/cryptography-49.0.0.tar.gz", hash = "sha256:f89660a348f4f78a92366240a61404e337586ef7f5909a2fef59ca88ef505493", size = 854345, upload-time = "2026-06-12T20:02:30.512Z" }
 wheels = [
@@ -758,7 +775,8 @@ dependencies = [
     { name = "dill" },
     { name = "filelock" },
     { name = "fsspec", extra = ["http"] },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception-v2'" },
     { name = "multiprocess" },
     { name = "numpy" },
     { name = "packaging" },
@@ -803,7 +821,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
     { name = "httpx" },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception-v2'" },
     { name = "importlib-metadata" },
     { name = "numpy" },
     { name = "pillow" },
@@ -963,7 +982,7 @@ dev = [
 perception = [
     { name = "accelerate" },
     { name = "casadi" },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" } },
     { name = "opencv-python" },
     { name = "openpi-client" },
     { name = "paramiko" },
@@ -974,7 +993,28 @@ perception = [
     { name = "safetensors" },
     { name = "sam2" },
     { name = "torch" },
-    { name = "transformers" },
+    { name = "transformers", version = "4.53.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "tyro" },
+    { name = "unitree-deploy" },
+    { name = "unitree-sdk2py" },
+]
+perception-v2 = [
+    { name = "accelerate" },
+    { name = "casadi" },
+    { name = "einops" },
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "opencv-python" },
+    { name = "openpi-client" },
+    { name = "paramiko" },
+    { name = "pin" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "pyzmq" },
+    { name = "safetensors" },
+    { name = "scipy" },
+    { name = "timm" },
+    { name = "torch" },
+    { name = "transformers", version = "5.14.1", source = { registry = "https://pypi.org/simple" } },
     { name = "tyro" },
     { name = "unitree-deploy" },
     { name = "unitree-sdk2py" },
@@ -1032,6 +1072,27 @@ perception = [
     { name = "sam2", specifier = ">=1.0" },
     { name = "torch" },
     { name = "transformers", specifier = ">=4.40,<5" },
+    { name = "tyro" },
+    { name = "unitree-deploy", editable = "third_party/unitree_deploy" },
+    { name = "unitree-sdk2py", git = "https://github.com/unitreerobotics/unitree_sdk2_python" },
+]
+perception-v2 = [
+    { name = "accelerate", specifier = ">=0.25" },
+    { name = "casadi" },
+    { name = "einops", specifier = ">=0.7" },
+    { name = "huggingface-hub", specifier = ">=0.23" },
+    { name = "opencv-python" },
+    { name = "openpi-client", editable = "third_party/openpi/packages/openpi-client" },
+    { name = "paramiko" },
+    { name = "pin" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "pyzmq" },
+    { name = "safetensors", specifier = ">=0.4" },
+    { name = "scipy", specifier = ">=1.11" },
+    { name = "timm", specifier = ">=0.9" },
+    { name = "torch" },
+    { name = "transformers", specifier = ">=5" },
     { name = "tyro" },
     { name = "unitree-deploy", editable = "third_party/unitree_deploy" },
     { name = "unitree-sdk2py", git = "https://github.com/unitreerobotics/unitree_sdk2_python" },
@@ -1267,7 +1328,7 @@ dependencies = [
     { name = "filelock" },
     { name = "requests", extra = ["socks"] },
     { name = "tqdm" },
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6a/b5/a45f62f20664031bf74a6aeb6f8d8cd5910e411bf90d756bd6b09bdc6c35/gdown-6.1.0.tar.gz", hash = "sha256:361c6e04c6ca335df50b9d71f40bcfe9ab70fb26a1b0e890a427267781389553", size = 269670, upload-time = "2026-05-30T11:56:21.322Z" }
 wheels = [
@@ -1429,7 +1490,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dm-control" },
     { name = "gymnasium" },
-    { name = "imageio", extra = ["ffmpeg"] },
+    { name = "imageio", extra = ["ffmpeg"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "mujoco" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b5/5e/4bb7204730501c2f645e0532a2df4339206948b2882f77cbf0eaf75bc5fe/gym_aloha-0.1.3.tar.gz", hash = "sha256:b794b246a2e6da6ce5f75e152f553fbd4412704bc217fe6311d0ede3bb72a75e", size = 443468, upload-time = "2025-10-09T14:02:35.024Z" }
@@ -1599,15 +1660,27 @@ wheels = [
 name = "huggingface-hub"
 version = "0.36.2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
 dependencies = [
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
+    { name = "filelock", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "fsspec", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "hf-xet", marker = "(platform_machine == 'aarch64' and extra == 'group-6-ego2g1-perception') or (platform_machine == 'aarch64' and extra != 'group-6-ego2g1-perception-v2') or (platform_machine == 'amd64' and extra == 'group-6-ego2g1-perception') or (platform_machine == 'amd64' and extra != 'group-6-ego2g1-perception-v2') or (platform_machine == 'arm64' and extra == 'group-6-ego2g1-perception') or (platform_machine == 'arm64' and extra != 'group-6-ego2g1-perception-v2') or (platform_machine == 'x86_64' and extra == 'group-6-ego2g1-perception') or (platform_machine == 'x86_64' and extra != 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "packaging", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyyaml", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "requests", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "tqdm", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "typing-extensions", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7c/b7/8cb61d2eece5fb05a83271da168186721c450eb74e3c31f7ef3169fa475b/huggingface_hub-0.36.2.tar.gz", hash = "sha256:1934304d2fb224f8afa3b87007d58501acfda9215b334eed53072dd5e815ff7a", size = 649782, upload-time = "2026-02-06T09:24:13.098Z" }
 wheels = [
@@ -1616,10 +1689,42 @@ wheels = [
 
 [package.optional-dependencies]
 cli = [
-    { name = "inquirerpy" },
+    { name = "inquirerpy", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 hf-transfer = [
-    { name = "hf-transfer" },
+    { name = "hf-transfer", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+]
+
+[[package]]
+name = "huggingface-hub"
+version = "1.26.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
+dependencies = [
+    { name = "click", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "filelock", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "fsspec", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "hf-xet", marker = "(platform_machine == 'AMD64' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'aarch64' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'amd64' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'arm64' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'x86_64' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "httpx", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "packaging", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "pyyaml", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "tqdm", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "typing-extensions", marker = "extra == 'group-6-ego2g1-perception-v2'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/82/db/3582597f8be0d34bd6881365a26d390854f12893eabdd62dd36de9df5a47/huggingface_hub-1.26.0.tar.gz", hash = "sha256:c8cd4e2df1ba9402f77fce9b509ec1d52debb502551789473f34016acc14e361", size = 936665, upload-time = "2026-07-30T14:12:04.156Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/97/bb/63a644c75b545f3ff394b822e9bd1c4a9586489c618b77a4d8a44a33a23b/huggingface_hub-1.26.0-py3-none-any.whl", hash = "sha256:e8cca670caa5d8dfa7e45bf45e86b466698198cd8150c021bcdb4a86b9252364", size = 780357, upload-time = "2026-07-30T14:12:01.998Z" },
 ]
 
 [[package]]
@@ -1713,8 +1818,8 @@ name = "inquirerpy"
 version = "0.3.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pfzy" },
-    { name = "prompt-toolkit" },
+    { name = "pfzy", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "prompt-toolkit", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/64/73/7570847b9da026e07053da3bbe2ac7ea6cde6bb2cbd3c7a5a950fa0ae40b/InquirerPy-0.3.4.tar.gz", hash = "sha256:89d2ada0111f337483cb41ae31073108b2ec1e618a49d7110b0d7ade89fc197e", size = 44431, upload-time = "2022-06-27T23:11:20.598Z" }
 wheels = [
@@ -1768,7 +1873,7 @@ wheels = [
 
 [package.optional-dependencies]
 cuda12 = [
-    { name = "jax-cuda12-plugin", extra = ["with-cuda"] },
+    { name = "jax-cuda12-plugin", extra = ["with-cuda"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "jaxlib" },
 ]
 
@@ -1913,7 +2018,8 @@ dependencies = [
     { name = "gdown" },
     { name = "gymnasium" },
     { name = "h5py" },
-    { name = "huggingface-hub", extra = ["cli", "hf-transfer"] },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, extra = ["cli", "hf-transfer"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception-v2'" },
     { name = "imageio", extra = ["ffmpeg"] },
     { name = "jsonlines" },
     { name = "numba" },
@@ -1926,7 +2032,7 @@ dependencies = [
     { name = "rerun-sdk" },
     { name = "termcolor" },
     { name = "torch" },
-    { name = "torchcodec", marker = "(platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'darwin') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "torchcodec", marker = "(platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l' and sys_platform == 'linux') or (platform_machine != 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (platform_machine == 'armv7l' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine == 'armv7l' and sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "torchvision" },
     { name = "wandb" },
     { name = "zarr" },
@@ -2400,7 +2506,9 @@ name = "nvidia-cuda-nvrtc-cu12"
 version = "12.6.77"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/2f/72df534873235983cc0a5371c3661bebef7c4682760c275590b972c7b0f9/nvidia_cuda_nvrtc_cu12-12.6.77-py3-none-manylinux2014_aarch64.whl", hash = "sha256:5847f1d6e5b757f1d2b3991a01082a44aad6f10ab3c5c0213fa3e25bddc25a13", size = 23162955, upload-time = "2024-10-01T16:59:50.922Z" },
     { url = "https://files.pythonhosted.org/packages/75/2e/46030320b5a80661e88039f59060d1790298b4718944a65a7f2aeda3d9e9/nvidia_cuda_nvrtc_cu12-12.6.77-py3-none-manylinux2014_x86_64.whl", hash = "sha256:35b0cc6ee3a9636d5409133e79273ce1f3fd087abb0532d2d2e8fff1fe9efc53", size = 23650380, upload-time = "2024-10-01T17:00:14.643Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/46/d3a1cdda8bb113c80f43a0a6f3a853356d487b830f3483f92d49ce87fa55/nvidia_cuda_nvrtc_cu12-12.6.77-py3-none-win_amd64.whl", hash = "sha256:f7007dbd914c56bd80ea31bc43e8e149da38f68158f423ba845fc3292684e45a", size = 39026742, upload-time = "2024-10-01T17:10:49.058Z" },
 ]
 
 [[package]]
@@ -2420,7 +2528,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.5.1.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/93/a201a12d3ec1caa8c6ac34c1c2f9eeb696b886f0c36ff23c638b46603bd0/nvidia_cudnn_cu12-9.5.1.17-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:9fd4584468533c61873e5fda8ca41bac3a38bcb2d12350830c69b0a96a7e4def", size = 570523509, upload-time = "2024-10-25T19:53:03.148Z" },
@@ -2433,7 +2541,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1f/37/c50d2b2f2c07e146776389e3080f4faf70bcc4fa6e19d65bb54ca174ebc3/nvidia_cufft_cu12-11.3.0.4-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d16079550df460376455cba121db6564089176d9bac9e4f360493ca4741b22a6", size = 200164144, upload-time = "2024-11-20T17:40:58.288Z" },
@@ -2449,6 +2557,7 @@ version = "1.11.1.6"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/66/cc9876340ac68ae71b15c743ddb13f8b30d5244af344ec8322b449e35426/nvidia_cufile_cu12-1.11.1.6-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:cc23469d1c7e52ce6c1d55253273d32c565dd22068647f3aa59b3c6b005bf159", size = 1142103, upload-time = "2024-11-20T17:42:11.83Z" },
+    { url = "https://files.pythonhosted.org/packages/17/bf/cc834147263b929229ce4aadd62869f0b195e98569d4c28b23edc72b85d9/nvidia_cufile_cu12-1.11.1.6-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:8f57a0051dcf2543f6dc2b98a98cb2719c37d3cee1baba8965d57f3bbc90d4db", size = 1066155, upload-time = "2024-11-20T17:41:49.376Z" },
 ]
 
 [[package]]
@@ -2456,8 +2565,11 @@ name = "nvidia-curand-cu12"
 version = "10.3.7.77"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/ac/36543605358a355632f1a6faa3e2d5dfb91eab1e4bc7d552040e0383c335/nvidia_curand_cu12-10.3.7.77-py3-none-manylinux2014_aarch64.whl", hash = "sha256:6e82df077060ea28e37f48a3ec442a8f47690c7499bff392a5938614b56c98d8", size = 56289881, upload-time = "2024-10-01T17:04:18.981Z" },
     { url = "https://files.pythonhosted.org/packages/73/1b/44a01c4e70933637c93e6e1a8063d1e998b50213a6b65ac5a9169c47e98e/nvidia_curand_cu12-10.3.7.77-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a42cd1344297f70b9e39a1e4f467a4e1c10f1da54ff7a85c12197f6c652c8bdf", size = 56279010, upload-time = "2024-11-20T17:42:50.958Z" },
     { url = "https://files.pythonhosted.org/packages/4a/aa/2c7ff0b5ee02eaef890c0ce7d4f74bc30901871c5e45dee1ae6d0083cd80/nvidia_curand_cu12-10.3.7.77-py3-none-manylinux2014_x86_64.whl", hash = "sha256:99f1a32f1ac2bd134897fc7a203f779303261268a65762a623bf30cc9fe79117", size = 56279000, upload-time = "2024-10-01T17:04:45.274Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/02/5362a9396f23f7de1dd8a64369e87c85ffff8216fc8194ace0fa45ba27a5/nvidia_curand_cu12-10.3.7.77-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:7b2ed8e95595c3591d984ea3603dd66fe6ce6812b886d59049988a712ed06b6e", size = 56289882, upload-time = "2024-11-20T17:42:25.222Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/a8/0cd0cec757bd4b4b4ef150fca62ec064db7d08a291dced835a0be7d2c147/nvidia_curand_cu12-10.3.7.77-py3-none-win_amd64.whl", hash = "sha256:6d6d935ffba0f3d439b7cd968192ff068fafd9018dbf1b85b37261b13cfc9905", size = 55783873, upload-time = "2024-10-01T17:13:30.377Z" },
 ]
 
 [[package]]
@@ -2465,9 +2577,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cusparse-cu12" },
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/93/17/dbe1aa865e4fdc7b6d4d0dd308fdd5aaab60f939abfc0ea1954eac4fb113/nvidia_cusolver_cu12-11.7.1.2-py3-none-manylinux2014_aarch64.whl", hash = "sha256:0ce237ef60acde1efc457335a2ddadfd7610b892d94efee7b776c64bb1cac9e0", size = 157833628, upload-time = "2024-10-01T17:05:05.591Z" },
@@ -2482,7 +2594,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/eb/6681efd0aa7df96b4f8067b3ce7246833dd36830bb4cec8896182773db7d/nvidia_cusparse_cu12-12.5.4.2-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d25b62fb18751758fe3c93a4a08eff08effedfe4edf1c6bb5afd0890fe88f887", size = 216451147, upload-time = "2024-11-20T17:44:18.055Z" },
@@ -2497,7 +2609,9 @@ name = "nvidia-cusparselt-cu12"
 version = "0.6.3"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/da/4de092c61c6dea1fc9c936e69308a02531d122e12f1f649825934ad651b5/nvidia_cusparselt_cu12-0.6.3-py3-none-manylinux2014_aarch64.whl", hash = "sha256:8371549623ba601a06322af2133c4a44350575f5a3108fb75f3ef20b822ad5f1", size = 156402859, upload-time = "2024-10-16T02:23:17.184Z" },
     { url = "https://files.pythonhosted.org/packages/3b/9a/72ef35b399b0e183bc2e8f6f558036922d453c4d8237dab26c666a04244b/nvidia_cusparselt_cu12-0.6.3-py3-none-manylinux2014_x86_64.whl", hash = "sha256:e5c8a26c36445dd2e6812f1177978a24e2d37cacce7e090f297a688d1ec44f46", size = 156785796, upload-time = "2024-10-15T21:29:17.709Z" },
+    { url = "https://files.pythonhosted.org/packages/46/3e/9e1e394a02a06f694be2c97bbe47288bb7c90ea84c7e9cf88f7b28afe165/nvidia_cusparselt_cu12-0.6.3-py3-none-win_amd64.whl", hash = "sha256:3b325bcbd9b754ba43df5a311488fca11a6b5dc3d11df4d190c000cf1a0765c7", size = 155595972, upload-time = "2024-10-15T22:58:35.426Z" },
 ]
 
 [[package]]
@@ -2524,8 +2638,11 @@ name = "nvidia-nvtx-cu12"
 version = "12.6.77"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/93/80f8a520375af9d7ee44571a6544653a176e53c2b8ccce85b97b83c2491b/nvidia_nvtx_cu12-12.6.77-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:f44f8d86bb7d5629988d61c8d3ae61dddb2015dee142740536bc7481b022fe4b", size = 90549, upload-time = "2024-11-20T17:38:17.387Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/53/36e2fd6c7068997169b49ffc8c12d5af5e5ff209df6e1a2c4d373b3a638f/nvidia_nvtx_cu12-12.6.77-py3-none-manylinux2014_aarch64.whl", hash = "sha256:adcaabb9d436c9761fca2b13959a2d237c5f9fd406c8e4b723c695409ff88059", size = 90539, upload-time = "2024-10-01T17:00:27.179Z" },
     { url = "https://files.pythonhosted.org/packages/56/9a/fff8376f8e3d084cd1530e1ef7b879bb7d6d265620c95c1b322725c694f4/nvidia_nvtx_cu12-12.6.77-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b90bed3df379fa79afbd21be8e04a0314336b8ae16768b58f2d34cb1d04cd7d2", size = 89276, upload-time = "2024-11-20T17:38:27.621Z" },
     { url = "https://files.pythonhosted.org/packages/9e/4e/0d0c945463719429b7bd21dece907ad0bde437a2ff12b9b12fee94722ab0/nvidia_nvtx_cu12-12.6.77-py3-none-manylinux2014_x86_64.whl", hash = "sha256:6574241a3ec5fdc9334353ab8c479fe75841dbe8f4532a8fc97ce63503330ba1", size = 89265, upload-time = "2024-10-01T17:00:38.172Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/cd/98a447919d4ed14d407ac82b14b0a0c9c1dbfe81099934b1fc3bfd1e6316/nvidia_nvtx_cu12-12.6.77-py3-none-win_amd64.whl", hash = "sha256:2fb11a4af04a5e6c84073e6404d26588a34afd35379f0855a99797897efa75c0", size = 56434, upload-time = "2024-10-01T17:11:13.124Z" },
 ]
 
 [[package]]
@@ -2598,10 +2715,10 @@ dependencies = [
     { name = "filelock" },
     { name = "flatbuffers" },
     { name = "flax" },
-    { name = "fsspec", extra = ["gcs"] },
+    { name = "fsspec", extra = ["gcs"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "gym-aloha" },
     { name = "imageio" },
-    { name = "jax", extra = ["cuda12"] },
+    { name = "jax", extra = ["cuda12"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "jaxtyping" },
     { name = "lerobot" },
     { name = "ml-collections" },
@@ -2616,7 +2733,7 @@ dependencies = [
     { name = "sentencepiece" },
     { name = "torch" },
     { name = "tqdm-loggable" },
-    { name = "transformers" },
+    { name = "transformers", version = "4.53.2", source = { registry = "https://pypi.org/simple" } },
     { name = "treescope" },
     { name = "typing-extensions" },
     { name = "tyro" },
@@ -2729,7 +2846,7 @@ version = "0.11.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
-    { name = "etils", extra = ["epath", "epy"] },
+    { name = "etils", extra = ["epath", "epy"], marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "humanize" },
     { name = "jax" },
     { name = "msgpack" },
@@ -2771,7 +2888,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f8/87/4341c6252d1c47b08768c3d25ac487362bf403f0313ddae4a2a26c9b1b4c/pandas-3.0.3.tar.gz", hash = "sha256:696a4a00a2a2a35d4e5deb3fc946641b96c944f02230e4f76137fe35d806c4fc", size = 4651414, upload-time = "2026-05-11T18:54:29.21Z" }
 wheels = [
@@ -2947,7 +3064,7 @@ name = "prompt-toolkit"
 version = "3.0.52"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "wcwidth" },
+    { name = "wcwidth", marker = "extra == 'group-6-ego2g1-perception' or extra != 'group-6-ego2g1-perception-v2' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/96/06e01a7b38dce6fe1db213e061a4602dd6032a8a97ef6c1a862537732421/prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855", size = 434198, upload-time = "2025-08-27T15:24:02.057Z" }
 wheels = [
@@ -3210,7 +3327,7 @@ name = "pynacl"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", hash = "sha256:018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c", size = 3511692, upload-time = "2026-01-01T17:48:10.851Z" }
 wheels = [
@@ -3233,10 +3350,10 @@ name = "pynput"
 version = "1.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "evdev", marker = "'linux' in sys_platform" },
-    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
-    { name = "python-xlib", marker = "'linux' in sys_platform" },
+    { name = "evdev", marker = "'linux' in sys_platform or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "python-xlib", marker = "'linux' in sys_platform or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "six" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/86/c6/e2d415610cfbc78308bee44218a46124aaa3301b1df08814df819b2254a1/pynput-1.8.2.tar.gz", hash = "sha256:f493c87157cd3861b4468f7f896857051762f44ed26f1b641e7cc5840a457087", size = 82818, upload-time = "2026-05-12T19:11:39.464Z" }
@@ -3259,10 +3376,10 @@ name = "pyobjc-framework-applicationservices"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-coretext", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-core", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-coretext", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5e/4d/0ebdd8144aba94b8fe9828ccee5616a4bf53d1f8bc51cff55f3cce86d695/pyobjc_framework_applicationservices-12.2.1.tar.gz", hash = "sha256:048ea663c9ac75c44a15dc7d5b8d78cbb4c97bf1c76e83835e8d5498e184001f", size = 109342, upload-time = "2026-06-19T16:19:46.149Z" }
 wheels = [
@@ -3275,7 +3392,7 @@ name = "pyobjc-framework-cocoa"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-core", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/51/34/fbe38a204643aa4e1b91391cdce07a34da565a69171ebcad08de7438a556/pyobjc_framework_cocoa-12.2.1.tar.gz", hash = "sha256:b94b37fe5730e5ae1fb0052912cd174e6ec329b0bfba4a012ae5db1014b5864b", size = 3125751, upload-time = "2026-06-19T16:20:05.159Z" }
 wheels = [
@@ -3288,9 +3405,9 @@ name = "pyobjc-framework-coretext"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-core", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5a/9c/4c7f452059dc1d3845b8e627b9113c247a997b9b07518e848c2ab7ff3149/pyobjc_framework_coretext-12.2.1.tar.gz", hash = "sha256:af740e784d7c592c34025ec7165f4f6c1a69b5a2d9075f06e41e4f77c212aed2", size = 97349, upload-time = "2026-06-19T16:20:22.508Z" }
 wheels = [
@@ -3303,8 +3420,8 @@ name = "pyobjc-framework-quartz"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },
-    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-core", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/f6/2a8b84dbf1fe7c04dd96ea73d991678d4e09a909f51971ecc51629bb2ab4/pyobjc_framework_quartz-12.2.1.tar.gz", hash = "sha256:b3b8b6f71e66147f8ff9e6213864cc8527e3a0b1ee90835b93ce221f4802d9b0", size = 3215521, upload-time = "2026-06-19T16:21:30.199Z" }
 wheels = [
@@ -3344,7 +3461,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -3423,7 +3540,7 @@ name = "pyzmq"
 version = "27.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "implementation_name == 'pypy'" },
+    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/04/0b/3c9baedbdf613ecaa7aa07027780b8867f57b6293b6ee50de316c9f3222b/pyzmq-27.1.0.tar.gz", hash = "sha256:ac0765e3d44455adb6ddbf4417dcce460fc40a05978c08efdf2948072f6db540", size = 281750, upload-time = "2025-09-08T23:10:18.157Z" }
 wheels = [
@@ -3583,7 +3700,7 @@ version = "1.9.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "rich" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f7/ea/21e4867ea0ef881ffd4c0550fc21a061435e50d6324bcd034396633cbc18/rich_click-1.9.8.tar.gz", hash = "sha256:4008f921da88b5d91646c134ec881c1500e5a6b3f093e90e8f29400e09608371", size = 75363, upload-time = "2026-05-28T19:54:59.144Z" }
@@ -3706,6 +3823,15 @@ wheels = [
 ]
 
 [[package]]
+name = "shellingham"
+version = "1.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b27b655beb4b4e9c62313a4e8da8c676e142cc210d58e/shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de", size = 10310, upload-time = "2023-10-24T04:13:40.426Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
+]
+
+[[package]]
 name = "simplejson"
 version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3817,11 +3943,39 @@ wheels = [
 ]
 
 [[package]]
+name = "timm"
+version = "1.0.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "torchvision" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/35/03/e41389ac641747bfec48d016fde8be1eade1901e6f2c1aedcb0c8cb4b5d9/timm-1.0.28.tar.gz", hash = "sha256:3789d313fdd5541a327b60180d70dbb4bdec73db8ff0655e413db3c3d134a9a4", size = 2451413, upload-time = "2026-07-11T17:24:32.615Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/76/de1bfac17d183c49c6d0887903d3064ced51cf1d9ba7a8d611c1a8808c4f/timm-1.0.28-py3-none-any.whl", hash = "sha256:e577b88da96b3a722ea5e2f042455ce6f715d398304d8e63b17d126ed7d89968", size = 2597944, upload-time = "2026-07-11T17:24:30.869Z" },
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.21.4"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
 dependencies = [
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c2/2f/402986d0823f8d7ca139d969af2917fefaa9b947d1fb32f6168c509f2492/tokenizers-0.21.4.tar.gz", hash = "sha256:fa23f85fbc9a02ec5c6978da172cdcbac23498c3ca9f3645c5c68740ac007880", size = 351253, upload-time = "2025-07-28T15:48:54.325Z" }
 wheels = [
@@ -3839,6 +3993,44 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/0a/42348c995c67e2e6e5c89ffb9cfd68507cbaeb84ff39c49ee6e0a6dd0fd2/tokenizers-0.21.4-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c212aa4e45ec0bb5274b16b6f31dd3f1c41944025c2358faaa5782c754e84c24", size = 9461980, upload-time = "2025-07-28T15:48:52.325Z" },
     { url = "https://files.pythonhosted.org/packages/3d/d3/dacccd834404cd71b5c334882f3ba40331ad2120e69ded32cf5fda9a7436/tokenizers-0.21.4-cp39-abi3-win32.whl", hash = "sha256:6c42a930bc5f4c47f4ea775c91de47d27910881902b0f20e4990ebe045a415d0", size = 2329871, upload-time = "2025-07-28T15:48:56.841Z" },
     { url = "https://files.pythonhosted.org/packages/41/f2/fd673d979185f5dcbac4be7d09461cbb99751554ffb6718d0013af8604cb/tokenizers-0.21.4-cp39-abi3-win_amd64.whl", hash = "sha256:475d807a5c3eb72c59ad9b5fcdb254f6e17f53dfcbb9903233b0dfa9c943b597", size = 2507568, upload-time = "2025-07-28T15:48:55.456Z" },
+]
+
+[[package]]
+name = "tokenizers"
+version = "0.22.2"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
+dependencies = [
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" } },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/73/6f/f80cfef4a312e1fb34baf7d85c72d4411afde10978d4657f8cdd811d3ccc/tokenizers-0.22.2.tar.gz", hash = "sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917", size = 372115, upload-time = "2026-01-05T10:45:15.988Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/97/5dbfabf04c7e348e655e907ed27913e03db0923abb5dfdd120d7b25630e1/tokenizers-0.22.2-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:544dd704ae7238755d790de45ba8da072e9af3eea688f698b137915ae959281c", size = 3100275, upload-time = "2026-01-05T10:41:02.158Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/47/174dca0502ef88b28f1c9e06b73ce33500eedfac7a7692108aec220464e7/tokenizers-0.22.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:1e418a55456beedca4621dbab65a318981467a2b188e982a23e117f115ce5001", size = 2981472, upload-time = "2026-01-05T10:41:00.276Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/84/7990e799f1309a8b87af6b948f31edaa12a3ed22d11b352eaf4f4b2e5753/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2249487018adec45d6e3554c71d46eb39fa8ea67156c640f7513eb26f318cec7", size = 3290736, upload-time = "2026-01-05T10:40:32.165Z" },
+    { url = "https://files.pythonhosted.org/packages/78/59/09d0d9ba94dcd5f4f1368d4858d24546b4bdc0231c2354aa31d6199f0399/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:25b85325d0815e86e0bac263506dd114578953b7b53d7de09a6485e4a160a7dd", size = 3168835, upload-time = "2026-01-05T10:40:38.847Z" },
+    { url = "https://files.pythonhosted.org/packages/47/50/b3ebb4243e7160bda8d34b731e54dd8ab8b133e50775872e7a434e524c28/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:bfb88f22a209ff7b40a576d5324bf8286b519d7358663db21d6246fb17eea2d5", size = 3521673, upload-time = "2026-01-05T10:40:56.614Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/fa/89f4cb9e08df770b57adb96f8cbb7e22695a4cb6c2bd5f0c4f0ebcf33b66/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:1c774b1276f71e1ef716e5486f21e76333464f47bece56bbd554485982a9e03e", size = 3724818, upload-time = "2026-01-05T10:40:44.507Z" },
+    { url = "https://files.pythonhosted.org/packages/64/04/ca2363f0bfbe3b3d36e95bf67e56a4c88c8e3362b658e616d1ac185d47f2/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:df6c4265b289083bf710dff49bc51ef252f9d5be33a45ee2bed151114a56207b", size = 3379195, upload-time = "2026-01-05T10:40:51.139Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/76/932be4b50ef6ccedf9d3c6639b056a967a86258c6d9200643f01269211ca/tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67", size = 3274982, upload-time = "2026-01-05T10:40:58.331Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/28/5f9f5a4cc211b69e89420980e483831bcc29dade307955cc9dc858a40f01/tokenizers-0.22.2-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:29c30b83d8dcd061078b05ae0cb94d3c710555fbb44861139f9f83dcca3dc3e4", size = 9478245, upload-time = "2026-01-05T10:41:04.053Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/fb/66e2da4704d6aadebf8cb39f1d6d1957df667ab24cff2326b77cda0dcb85/tokenizers-0.22.2-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:37ae80a28c1d3265bb1f22464c856bd23c02a05bb211e56d0c5301a435be6c1a", size = 9560069, upload-time = "2026-01-05T10:45:10.673Z" },
+    { url = "https://files.pythonhosted.org/packages/16/04/fed398b05caa87ce9b1a1bb5166645e38196081b225059a6edaff6440fac/tokenizers-0.22.2-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:791135ee325f2336f498590eb2f11dc5c295232f288e75c99a36c5dbce63088a", size = 9899263, upload-time = "2026-01-05T10:45:12.559Z" },
+    { url = "https://files.pythonhosted.org/packages/05/a1/d62dfe7376beaaf1394917e0f8e93ee5f67fea8fcf4107501db35996586b/tokenizers-0.22.2-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:38337540fbbddff8e999d59970f3c6f35a82de10053206a7562f1ea02d046fa5", size = 10033429, upload-time = "2026-01-05T10:45:14.333Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/18/a545c4ea42af3df6effd7d13d250ba77a0a86fb20393143bbb9a92e434d4/tokenizers-0.22.2-cp39-abi3-win32.whl", hash = "sha256:a6bf3f88c554a2b653af81f3204491c818ae2ac6fbc09e76ef4773351292bc92", size = 2502363, upload-time = "2026-01-05T10:45:20.593Z" },
+    { url = "https://files.pythonhosted.org/packages/65/71/0670843133a43d43070abeb1949abfdef12a86d490bea9cd9e18e37c5ff7/tokenizers-0.22.2-cp39-abi3-win_amd64.whl", hash = "sha256:c9ea31edff2968b44a88f97d784c2f16dc0729b8b143ed004699ebca91f05c48", size = 2747786, upload-time = "2026-01-05T10:45:18.411Z" },
+    { url = "https://files.pythonhosted.org/packages/72/f4/0de46cfa12cdcbcd464cc59fde36912af405696f687e53a091fb432f694c/tokenizers-0.22.2-cp39-abi3-win_arm64.whl", hash = "sha256:9ce725d22864a1e965217204946f830c37876eee3b2ba6fc6255e8e903d5fcbc", size = 2612133, upload-time = "2026-01-05T10:45:17.232Z" },
 ]
 
 [[package]]
@@ -3868,23 +4060,23 @@ dependencies = [
     { name = "fsspec" },
     { name = "jinja2" },
     { name = "networkx" },
-    { name = "nvidia-cublas-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cufft-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cufile-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-curand-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusolver-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusparse-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusparselt-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nccl-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvtx-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "setuptools", marker = "python_full_version >= '3.12'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "setuptools", marker = "python_full_version >= '3.12' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "sympy" },
-    { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "triton", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (platform_machine != 'x86_64' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform != 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "typing-extensions" },
 ]
 wheels = [
@@ -3906,9 +4098,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/cc/7e/1327cbf7fd2013ac2c06f438e6e6b4d4728b754d98e7c1539b80bafe5d42/torchcodec-0.15.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:a1f089f44e237620a291078f3b039e3262c73bf0e5ff83747e20fd67e55d53d7", size = 4407134, upload-time = "2026-07-15T10:14:00.551Z" },
     { url = "https://files.pythonhosted.org/packages/d0/2f/1ce2feb161bbd12719f7fd0accef64125f4a6d926e02cd360999b70429e4/torchcodec-0.15.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:7ce1c120275f80eff56842b856ebd48232e46a87c6351607dd8d60ccf197bbb0", size = 2715872, upload-time = "2026-07-15T10:14:02.014Z" },
     { url = "https://files.pythonhosted.org/packages/d8/ee/f14346b9e2d4aac6eee6f1658b5ffa1107e8c1be9e6a2130655a774755c6/torchcodec-0.15.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:1c4257dc64554f1ed848511b7415b772f7df98217a30610d284e2a0a4df1a427", size = 2976495, upload-time = "2026-07-15T10:14:03.439Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/b5/0ddc696f0121e5d300830cee43a73865a2436a8877833c97752cb005ed7b/torchcodec-0.15.0-cp311-cp311-win_amd64.whl", hash = "sha256:80a918b840c346f4167781a8eab241aeaf7d22979a603960f99c1ed1fc992461", size = 3234179, upload-time = "2026-07-15T10:14:04.917Z" },
     { url = "https://files.pythonhosted.org/packages/c6/5e/ba71ff29b3f957a7e05cfb5c1d189f34c4224166b5bbe900ec8320f506f7/torchcodec-0.15.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:3a4b24012f7a7fe962dfee8f06d9c91e9e3fd1f4b6302fdb5b8884a02aca3f37", size = 4576065, upload-time = "2026-07-15T10:14:06.554Z" },
     { url = "https://files.pythonhosted.org/packages/9d/de/c00b8d13e3e28de9c76f05b4c25fc4d882b4a3d1451b8d2073d089895684/torchcodec-0.15.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:5c62f4257b49c6473b0a1006519274b7daef9ef9c1d66b1a6a025dba9df5daac", size = 2727846, upload-time = "2026-07-15T10:14:08.066Z" },
     { url = "https://files.pythonhosted.org/packages/d0/05/b7ba7ae04db4afeb1fd32d30ec6290d511c374adc464afe191c8fc8d4e22/torchcodec-0.15.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:fa31e33884829332cc55b301aa9d23ba90bf164aa8576a8c68aed6c0061c2d8c", size = 2988620, upload-time = "2026-07-15T10:14:09.504Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/0f/fa432d8c8b523f5891a66483f607ec80e28ae025d99ce1d1c50667d8446b/torchcodec-0.15.0-cp312-cp312-win_amd64.whl", hash = "sha256:589e127778870c691d8977c08311bf57c4fecb9eb56fa52cf29d9671fe78eb72", size = 3242793, upload-time = "2026-07-15T10:14:10.84Z" },
 ]
 
 [[package]]
@@ -3936,7 +4130,7 @@ name = "tqdm"
 version = "4.68.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ae/5f/57ff8b434839e70dab45601284ea413e947a63799891b7553e5960a793a8/tqdm-4.68.4.tar.gz", hash = "sha256:19829c9673638f2a0b8617da4cdcb927e831cd88bcfcb6e78d42a4d1af131520", size = 792418, upload-time = "2026-07-07T09:58:18.369Z" }
 wheels = [
@@ -3959,21 +4153,65 @@ wheels = [
 name = "transformers"
 version = "4.53.2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
 dependencies = [
     { name = "filelock" },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" } },
     { name = "numpy" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "regex" },
     { name = "requests" },
     { name = "safetensors" },
-    { name = "tokenizers" },
+    { name = "tokenizers", version = "0.21.4", source = { registry = "https://pypi.org/simple" } },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4c/67/80f51466ec447028fd84469b208eb742533ce06cc8fad2e3181380199e5c/transformers-4.53.2.tar.gz", hash = "sha256:6c3ed95edfb1cba71c4245758f1b4878c93bf8cde77d076307dacb2cbbd72be2", size = 9201233, upload-time = "2025-07-11T12:39:08.742Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/88/beb33a79a382fcd2aed0be5222bdc47f41e4bfe7aaa90ae1374f1d8ea2af/transformers-4.53.2-py3-none-any.whl", hash = "sha256:db8f4819bb34f000029c73c3c557e7d06fc1b8e612ec142eecdae3947a9c78bf", size = 10826609, upload-time = "2025-07-11T12:39:05.461Z" },
+]
+
+[[package]]
+name = "transformers"
+version = "5.14.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version < '3.12' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
+dependencies = [
+    { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "regex" },
+    { name = "safetensors" },
+    { name = "tokenizers", version = "0.22.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "tqdm" },
+    { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/fb/2a2ba88f325e68a921d8b69ff63b477830b2e73ade9a3c8c8cab2f06d741/transformers-5.14.1.tar.gz", hash = "sha256:60d196c27781eacf8637e2b533f517582907ad6f9ae142046d6b69431a5b2173", size = 9295927, upload-time = "2026-07-16T09:41:57.773Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6f/67/8d85ca2323233ae3c0365a659c4e52ee1f587b440e4bc577e7d8e4416d0f/transformers-5.14.1-py3-none-any.whl", hash = "sha256:9db974c4079ede2d1a3ea7ca5a240df33f2cc26fc2b36ba64c5f2a4f43b6e725", size = 11625234, upload-time = "2026-07-16T09:41:54.143Z" },
 ]
 
 [[package]]
@@ -3993,7 +4231,7 @@ name = "triton"
 version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "setuptools", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/21/2f/3e56ea7b58f80ff68899b1dbe810ff257c9d177d288c6b0f55bf2fe4eb50/triton-3.3.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b31e3aa26f8cb3cc5bf4e187bf737cbacf17311e1112b781d4a059353dfd731b", size = 155689937, upload-time = "2025-05-29T23:39:44.182Z" },
@@ -4010,6 +4248,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/67/1c/dfba5c4633cafc4c701f237d2ba63b416805047fd6d96aab4cfc40969f98/typeguard-4.5.2.tar.gz", hash = "sha256:5a16dcac23502039299c97c8941651bc33d7ea8cc4b2f7d6bbb1b528f6eea423", size = 80240, upload-time = "2026-05-14T12:59:40.857Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5b/29/74eeb4d3f3ae61ca096b018ad486b3b3c74b17bec09ab4edab721cbefec3/typeguard-4.5.2-py3-none-any.whl", hash = "sha256:fcf9de18bd945cdb4c7b996e12b4c51ce83f92f191314a6d7cf1739586ec98cf", size = 36748, upload-time = "2026-05-14T12:59:39.473Z" },
+]
+
+[[package]]
+name = "typer"
+version = "0.27.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "rich" },
+    { name = "shellingham" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ae/40/4a3db7990d1f62a53182aa96eaef57aeb2886a27f90a195bc66713565d31/typer-0.27.1.tar.gz", hash = "sha256:a79bef8469a79c45498e7b814ecf8d603cc7644e9acbd9e19cac0334240b18df", size = 203994, upload-time = "2026-08-03T14:41:03.438Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/89/9518bc0c3929bee36b3a4a8e3daddd6e03f92f9961c66d4983b837160543/typer-0.27.1-py3-none-any.whl", hash = "sha256:53150287edd11baeb4e4722c8e394fcdf8181c0ae89485cba8d25c778d5edd56", size = 122874, upload-time = "2026-08-03T14:41:04.391Z" },
 ]
 
 [[package]]

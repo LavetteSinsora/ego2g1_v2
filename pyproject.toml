@@ -84,7 +84,52 @@ perception = [
     "accelerate>=0.25",
     "safetensors>=0.4",
 ]
+# The v2 perception stack (docs/perception_v2_pipeline.md): SAM 3 replaces
+# BOTH GroundingDINO and SAM2, so this group deliberately drops `sam2` and
+# the `<5` ceiling above. That ceiling is why `Sam3Model` cannot be imported
+# from a `perception` env: SAM 3 landed in transformers 5.0.0, and the
+# `perception` group forbids v5 because it was pinned for GroundingDINO.
+#
+# The two groups are declared CONFLICTING below rather than merged, because
+# they disagree on transformers and both are wanted during the transition --
+# `perception` keeps today's cascade runnable while `perception-v2` is
+# benchmarked. Sync one at a time:
+#
+#     uv sync --group perception-v2
+#     uv run python -m ego2g1.deploy.perception_v2_latency
+#
+# Orient Anything V2 is NOT listed here on purpose: it is a git repo imported
+# by path, auto-cloned into third_party/ by that script, and its own
+# requirements.txt pins gradio/pydantic/lightning/bpy (Blender) which would be
+# destructive to install here. Only its runtime imports matter, and they are
+# already covered by torch/numpy/pillow/scipy.
+perception-v2 = [
+    {include-group = "deploy"},
+    "transformers>=5",         # SAM 3: Sam3Model / Sam3VideoModel / Sam3TrackerVideoModel
+    "huggingface-hub>=0.23",
+    "accelerate>=0.25",
+    "safetensors>=0.4",
+    "scipy>=1.11",             # Orient Anything V2's val_fit_alpha
+    "timm>=0.9",               # vendored vggt backbone
+    "einops>=0.7",
+]
 dev = ["pytest"]
+
+[tool.uv]
+# `perception-v2` needs transformers>=5 (SAM 3) and collides with TWO other
+# groups that cannot have it:
+#   * `perception` pins <5 for GroundingDINO;
+#   * `train` pulls the vendored `openpi`, which pins transformers==4.53.2
+#     exactly (third_party/openpi/pyproject.toml:38).
+# None of the three are ever used in the same process -- training, today's
+# cascade, and the v2 benchmark are separate activities on separate machines
+# -- so declaring the conflicts lets uv resolve each on its own instead of
+# failing the whole project resolution. `deploy` is deliberately NOT in any
+# conflict set: it has no transformers dependency and every group includes it.
+conflicts = [
+    [{group = "perception"}, {group = "perception-v2"}],
+    [{group = "train"}, {group = "perception-v2"}],
+]
 
 [tool.uv.sources]
 openpi = { path = "third_party/openpi", editable = true }
