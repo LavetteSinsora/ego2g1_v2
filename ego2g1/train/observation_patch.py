@@ -60,11 +60,23 @@ class StockSourceChangedError(RuntimeError):
 class RelationObservation(_STOCK_OBSERVATION):
     """Stock Observation + the per-object hand-object relation matrix.
 
-    `relations` is (*b, n_objects, 18): for each object, its pose in the LEFT
-    TCP frame (9, vec9) concatenated with its pose in the RIGHT TCP frame (9).
-    Already normalized by the time it reaches the model (z-scored with stats
-    pooled ACROSS objects, so a shared encoder sees one consistent scale and the
-    prompt's object order can be shuffled freely).
+    `relations` is (*b, n, d), already normalized by the time it reaches the
+    model. What n and d MEAN depends on the config, and the last axis is
+    deliberately NOT pinned here:
+
+      - relation configs (red_block_in_pen_holder_ego): n = n_objects, d = 18 —
+        each object's pose in the LEFT TCP frame (vec9) concatenated with its
+        pose in the RIGHT TCP frame (vec9). Z-scored with stats pooled ACROSS
+        objects, so a shared encoder sees one consistent scale and the prompt's
+        object order can be shuffled freely.
+      - the UMI config reuses this same channel for STATE HISTORY: n = n_lags
+        (history_lags + 1), d = history_dim (7). See UmiTrainConfig, which
+        passes n_objects=n_lags / relation_dim=history_dim on purpose rather
+        than renaming the injection fields.
+
+    `EgoRelationModel.relation_dim` is the single source of truth for d — it is
+    what `inputs_spec` builds the encoder against. Hardcoding 18 in this
+    annotation instead made every UMI batch fail beartype at `from_dict`.
 
     Re-decorating with @struct.dataclass registers the subclass as its own flax
     pytree node with the full field list, so jax.tree.map / sharding / donation
@@ -72,7 +84,7 @@ class RelationObservation(_STOCK_OBSERVATION):
     every inherited field after `state` has one.
     """
 
-    relations: at.Float[_model.ArrayT, "*b n 18"] | None = None
+    relations: at.Float[_model.ArrayT, "*b n d"] | None = None
 
     @classmethod
     def from_dict(cls, data):
