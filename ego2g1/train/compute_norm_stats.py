@@ -225,11 +225,109 @@ def main_relation(config: _config.EgoRelationTrainConfig):
           f"(intent {2 * config.w_gripper / (12 + 2 * config.w_gripper) * 100:.2f}%)")
 
 
+def main_umi(config: _config.UmiTrainConfig):
+    """Stats for the UMI config: per-(slot, dim) action quantiles + PER-LAG
+    history z-score stats, both over the TRAIN split only.
+
+    Reads parquet directly (see dataset._umi_episode_frames): neither statistic
+    depends on a pixel, so iterating the LeRobot dataset would decode ~41k video
+    frames to compute the same numbers.
+    """
+    from ego2g1.train import dataset as _ds
+
+    h = config.action_horizon
+    d_real = config.action_dim_actual
+    grip = config.gripper_dims
+
+    meta = _ds.assert_umi_dataset_compatible(
+        config.dataset_root, config.expected_config_hash, h, config.fps,
+        config.hand, config.n_lags, max(config.lag_ticks),
+    )
+
+    print(f"Building relative action chunks from parquet (H={h}, D={d_real}) ...")
+    actions = _ds.umi_raw_action_chunks(config, h, split="train")        # (N, H, 7)
+    # full_only: lag j's stats must come from anchors where lag j is REAL, not
+    # from LeRobot's clamped duplicates of the episode's first frame
+    history = _ds.umi_raw_history(config, split="train", full_only=True)  # (M, n_lags, 7)
+    print(f"  actions {actions.shape}  history {history.shape}")
+
+    # Exact percentiles: float64 at this size is well under a GB, so there is no
+    # reason to approximate with a streaming estimator.
+    q01 = np.percentile(actions, 1, axis=0)
+    q99 = np.percentile(actions, 99, axis=0)
+
+    # What the model will actually see, so the loss weights are derived from the
+    # real distribution rather than a Gaussian assumption. Every dim including
+    # the gripper: it is continuous here, so nothing is exempt.
+    span = q99 - q01 + 1e-6
+    normalized = 2.0 * (actions - q01) / span - 1.0
+    if config.model_space_clamp is not None:
+        normalized = np.clip(normalized, -config.model_space_clamp, config.model_space_clamp)
+    model_space_variance = normalized.reshape(-1, d_real).var(axis=0)
+
+    stats = _norm.UmiNormStats(
+        action_q01=q01,
+        action_q99=q99,
+        history_mean=history.mean(axis=0),
+        history_std=history.std(axis=0),
+        gripper_dims=grip,
+        provenance={
+            "extraction_config_hash": meta["config_hash"],
+            "ego2g1_config_hash": config.config_hash(),
+            "num_chunks": int(actions.shape[0]),
+            "num_history_blocks": int(history.shape[0]),
+            "val_source_episodes": list(config.val_source_episodes),
+            "action_norm_scheme": config.action_norm_scheme,
+            "lag_ticks": list(config.lag_ticks),
+            "model_space_variance": model_space_variance.tolist(),
+            "gripper_raw_range": [float(actions[..., grip[0]].min()),
+                                  float(actions[..., grip[0]].max())],
+        },
+    )
+
+    problems = _norm.check_umi_stats_sanity(stats)
+    if problems:
+        raise SystemExit("Stats sanity check FAILED:\n  " + "\n  ".join(problems))
+
+    output_dir = config.assets_dirs / config.repo_id
+    print(f"Writing {_norm.UMI_FILENAME} to: {output_dir}")
+    _norm.save_umi(output_dir, stats)
+
+    # ------------------------------------------------------------------ report
+    from ego2g1.train import data_config as _dc
+
+    w = _dc.loss_dim_weights(stats, d_real, grip, config.w_gripper)
+    labels = ["dx", "dy", "dz", "rx", "ry", "rz", "grip"]
+    with np.printoptions(precision=4, suppress=True, linewidth=200):
+        print("\nmodel-space std per slot (target: uniform; a pooled scheme would leave")
+        print("slot 0 at ~1/30 unit scale on this dataset):")
+        for k in (0, 1, 9, 24, h - 1):
+            print(f"  slot {k:2d}: {normalized[:, k, :].std(axis=0)}")
+        print(f"\nmax |normalized|: {np.abs(normalized).max():.2f} "
+              f"(clamp {config.model_space_clamp})")
+        print(f"\nper-lag history std (lag 0's pose dims are structurally 0):")
+        for j, tick in enumerate(config.lag_ticks):
+            print(f"  lag {j} (t-{tick:2d}): {stats.history_std[j]}")
+        z = (history - stats.history_mean) / np.maximum(stats.history_std, 1e-6)
+        print(f"\nhistory |z|>{config.state_norm_clip} fraction: "
+              f"{float((np.abs(z) > config.state_norm_clip).mean()) * 100:.4f}%")
+    print(f"\nloss_dim_weights (w_gripper={config.w_gripper}, mean 1):")
+    for name, wi, v in zip(labels, w, model_space_variance, strict=True):
+        print(f"  {name:>5s}  Var(x1)={v:7.4f}  Var(u)={1 + v:7.4f}  w={wi:7.4f}")
+    tot = sum(wi * (1 + v) for wi, v in zip(w, model_space_variance, strict=True))
+    gshare = sum(w[d] * (1 + model_space_variance[d]) for d in grip) / tot
+    print(f"  -> gripper share of weighted MSE: {gshare * 100:.2f}% "
+          f"(intent {config.w_gripper / (6 + config.w_gripper) * 100:.2f}%)")
+
+
 if __name__ == "__main__":
     import sys
 
     if "--relation" in sys.argv:
         sys.argv.remove("--relation")
         main_relation(tyro.cli(_config.EgoRelationTrainConfig))
+    elif "--umi" in sys.argv:
+        sys.argv.remove("--umi")
+        main_umi(tyro.cli(_config.UmiTrainConfig))
     else:
         main(tyro.cli(_config.Ego2G1TrainConfig))

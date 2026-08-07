@@ -106,6 +106,23 @@ perception = [
 perception-v2 = [
     {include-group = "deploy"},
     "transformers>=5",         # SAM 3: Sam3Model / Sam3VideoModel / Sam3TrackerVideoModel
+    # `kernels` is DELIBERATELY ABSENT, though transformers asks for it.
+    #
+    # Adding it broke `ego2g1.serve`. The venv is shared across groups, so a
+    # `kernels` installed for perception-v2 stays on disk when you switch to
+    # --group train. transformers then imports it unconditionally
+    # (modeling_utils.py: `from kernels import get_kernel`), and current
+    # `kernels` needs huggingface-hub >=1.x for PEP-604 unions in its strict
+    # dataclasses -- but train resolves huggingface-hub to 0.36.2 via openpi,
+    # whose validator rejects `str | None`:
+    #     StrictDataclassFieldValidationError: field 'import_name'
+    # i.e. the serve path dies at import before doing anything.
+    #
+    # Cost of leaving it out: SAM 3 skips NMS post-processing, hole filling
+    # and sprinkle removal, so masks keep holes and duplicate detections
+    # survive, and measured SAM 3 latency is a slight UNDER-estimate. That is
+    # an acceptable trade against a serve path that will not start. Revisit
+    # only if openpi's huggingface-hub pin moves to >=1.x.
     "huggingface-hub>=0.23",
     "accelerate>=0.25",
     "safetensors>=0.4",

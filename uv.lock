@@ -37,12 +37,12 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception' or (extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
     { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "numpy", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "packaging", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "psutil", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "pyyaml", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "safetensors", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
-    { name = "torch", marker = "extra == 'group-6-ego2g1-perception' or extra == 'group-6-ego2g1-perception-v2'" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8d/75/94cd5d389649578aca399e5aa822637eec18319a1dadc400ffe2f9a7493f/accelerate-1.14.0.tar.gz", hash = "sha256:41b9c4377a54e0b460a959b0defa1b736e4ca0a2373252d9a539964c2afe3c8d", size = 412167, upload-time = "2026-06-11T13:45:52.326Z" }
 wheels = [
@@ -1662,12 +1662,12 @@ version = "0.36.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
@@ -3964,12 +3964,12 @@ version = "0.21.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
@@ -4155,12 +4155,12 @@ version = "4.53.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
@@ -4231,7 +4231,7 @@ name = "triton"
 version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'darwin' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'emscripten' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'win32' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception') or (sys_platform == 'linux' and extra != 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
+    { name = "setuptools", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'darwin' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'emscripten' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'win32' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception' and extra == 'group-6-ego2g1-perception-v2') or (sys_platform == 'linux' and extra == 'group-6-ego2g1-perception-v2' and extra == 'group-6-ego2g1-train')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/21/2f/3e56ea7b58f80ff68899b1dbe810ff257c9d177d288c6b0f55bf2fe4eb50/triton-3.3.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b31e3aa26f8cb3cc5bf4e187bf737cbacf17311e1112b781d4a059353dfd731b", size = 155689937, upload-time = "2025-05-29T23:39:44.182Z" },

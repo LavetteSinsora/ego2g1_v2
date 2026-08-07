@@ -147,6 +147,306 @@ def create_dataset(train_config, model_config, *, split: str = "train"):
 
 
 # --------------------------------------------------------------------------
+# UmiTrainConfig: red_block_on_yellow_block_umi and its schema
+# --------------------------------------------------------------------------
+
+# The dataset directory name, used to build `source_episode` strings — which is
+# what val_source_episodes matches on. One LeRobot episode per recording here,
+# so the mapping is the identity.
+UMI_RAW_DIR = "red_block_on_yellow_block_umi"
+
+
+def umi_extraction_meta(dataset_root) -> dict:
+    """Adapt the UMI dataset to the ego2g1 sidecar schema, in memory.
+
+    This dataset ships no `extraction_meta.json` at all, so every field below is
+    synthesized — and each is a TRUE statement about it rather than a
+    placeholder:
+
+    - `config_hash`: derived by hashing the schema-defining parts of
+      `info.json` (fps, robot_type, and the feature shapes). Same guarantee as a
+      real one — a differently-shaped re-export yields a different digest — just
+      computed on our side.
+    - `source_episode`: 117 episodes, one per recording, so LeRobot episode i is
+      `episode_i`. There is no source-path list to read, so the index IS the
+      identity.
+    - `episode_real_end = True`: correct. Nothing was filter-split; the end of
+      each episode really is the end of a take, so terminal padding legitimately
+      means "hold at the final pose".
+    - `anchor_bad = [0]`: LOAD-BEARING, not bookkeeping. `action[t]` is the state
+      at t+1 (see umi_transforms' module docstring), so the absolute pose at tick
+      t is `action[t-1]` and tick 0 has no real pose at all — LeRobot would clamp
+      the gather and hand back tick 1's pose silently. Excluding it costs 117 of
+      41207 frames and removes an entire class of off-by-one corruption.
+    """
+    root = pathlib.Path(dataset_root)
+    sidecar = root / "extraction_meta.json"
+    if sidecar.exists():
+        raw = json.loads(sidecar.read_text())
+        if "episodes" in raw and "config_hash" in raw:
+            return raw   # already ego2g1-schema; nothing to adapt
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    lengths = _episode_lengths(root)
+    schema = {
+        "fps": info["fps"],
+        "robot_type": info.get("robot_type"),
+        "features": {k: v.get("shape") for k, v in info["features"].items()},
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(schema, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+
+    episodes = {
+        str(i): {
+            "source_file": f"{UMI_RAW_DIR}/episode_{i}",
+            "source_episode": f"{UMI_RAW_DIR}/episode_{i}",
+            "tick_start": 0,
+            "tick_end": int(length),
+            "episode_real_end": True,
+            "anchor_bad": [0],
+        }
+        for i, length in enumerate(lengths)
+    }
+    return {
+        "config_hash": config_hash,
+        "config": schema,
+        "episodes": episodes,
+        "schema_version": info.get("codebase_version"),
+        "variant": "umi",
+        "adapted_by": "ego2g1.train.dataset.umi_extraction_meta",
+    }
+
+
+def _assert_umi_action_is_one_tick_ahead(dataset_root, n_episodes: int = 3) -> None:
+    """Verify `action[t, 9] == observation.state[t+1, 0]` on a few episodes.
+
+    THE assumption the whole config rests on. Everything -- the anchor, the pose
+    history, the gripper history, the chunk targets -- is read out of `action` at
+    offsets derived from "action[t] describes tick t+1". A re-export that changed
+    that alignment would shift every input by one tick and nothing downstream
+    would notice: the shapes stay right, the stats stay plausible, and the policy
+    just learns a slightly wrong world.
+
+    Measured 0.0 across all 117 episodes / 41207 frames on the dataset this was
+    written against, so an exact comparison is the honest test. Checked on a few
+    episodes rather than all of them because this runs before every training job.
+    """
+    import pandas as pd
+
+    root = pathlib.Path(dataset_root)
+    n = len(_episode_lengths(root))
+    for i in range(min(n_episodes, n)):
+        path = root / "data" / f"chunk-{i // 1000:03d}" / f"episode_{i:06d}.parquet"
+        df = pd.read_parquet(path, columns=["action", "observation.state"])
+        act = np.stack(df["action"].to_numpy()).astype(np.float64)
+        state = np.stack(df["observation.state"].to_numpy()).astype(np.float64).reshape(-1)
+        err = float(np.abs(act[:-1, 9] - state[1:]).max())
+        if err != 0.0:
+            raise ValueError(
+                f"episode {i}: action[t, 9] != observation.state[t+1, 0] (max err {err:g}). "
+                "This config reads the anchor, the pose history and the gripper history "
+                "out of `action` assuming action[t] describes tick t+1 "
+                "(ego2g1.train.umi_transforms module docstring). That assumption does not "
+                "hold for this export, so every input would be shifted by one tick."
+            )
+
+
+def assert_umi_dataset_compatible(dataset_root, expected_config_hash, action_horizon, fps,
+                                  hand="right", n_lags=6, history_span=15) -> dict:
+    """Fail loud before GPU time: schema widths, cameras, fps, horizon, lengths.
+
+    Checks the FEATURE WIDTHS and CAMERA KEYS from info.json rather than
+    trusting the config: a silently different export would otherwise surface as
+    a reshape error deep inside a dataloader worker, or — worse — as a plausible
+    loss on a wrong layout.
+    """
+    root = pathlib.Path(dataset_root)
+    meta = umi_extraction_meta(root)
+    if expected_config_hash is not None and meta["config_hash"] != expected_config_hash:
+        raise ValueError(
+            f"Dataset at {dataset_root} has (derived) schema config_hash "
+            f"{meta['config_hash']}, expected {expected_config_hash}."
+        )
+    info = json.loads((root / "meta" / "info.json").read_text())
+    if float(info["fps"]) != float(fps):
+        raise ValueError(f"dataset fps {info['fps']} != training fps {fps}")
+
+    feats = info["features"]
+    got_state = int(feats["observation.state"]["shape"][0])
+    got_action = int(feats["action"]["shape"][0])
+    if got_state != 1:
+        raise ValueError(
+            f"observation.state is {got_state}-dim, expected 1 (the continuous gripper). "
+            "A wider state means this export carries proprioception this config does not "
+            "know how to read."
+        )
+    if got_action != 10:
+        raise ValueError(
+            f"action is {got_action}-dim, expected 10 (absolute TCP vec9 + gripper)"
+        )
+    _assert_umi_action_is_one_tick_ahead(root)
+    other = "left" if hand == "right" else "right"
+    for key in (f"observation.images.cam_{hand}_wrist", f"observation.images.cam_{other}_wrist"):
+        if key not in feats:
+            raise ValueError(
+                f"missing camera feature {key!r}; this config needs BOTH the acting "
+                f"wrist camera and the context camera (have: "
+                f"{sorted(k for k in feats if k.startswith('observation.images.'))})"
+            )
+
+    # An episode must be long enough to hold the backward history AND the
+    # forward chunk from at least one anchor, or it contributes nothing but
+    # padded windows.
+    shortest = min(_episode_lengths(root))
+    if shortest <= action_horizon:
+        raise ValueError(
+            f"shortest episode is {shortest} frames <= action_horizon {action_horizon}: "
+            "it would contribute only padded chunks"
+        )
+    if shortest <= history_span + 1:
+        raise ValueError(
+            f"shortest episode is {shortest} frames <= the history span {history_span} + 1: "
+            f"no anchor in it could ever see a full {n_lags}-lag window"
+        )
+    return meta
+
+
+def create_umi_dataset(train_config, model_config, *, split: str = "train"):
+    """LeRobot dataset for the UMI schema, wrapped to the requested split.
+
+    `action` is gathered in BOTH directions (backward for the pose history,
+    forward for the chunk) because it is this dataset's only pose column; see
+    umi_transforms.make_delta_timestamps.
+    """
+    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+
+    from ego2g1.train import umi_transforms as _ut
+
+    root = pathlib.Path(train_config.dataset_root).resolve()
+    lags = train_config.lag_ticks
+    meta = assert_umi_dataset_compatible(
+        root, train_config.expected_config_hash, model_config.action_horizon,
+        train_config.fps, train_config.hand, train_config.n_lags, max(lags),
+    )
+
+    kwargs = {}
+    if getattr(train_config, "video_backend", None):
+        kwargs["video_backend"] = train_config.video_backend
+    dataset = lerobot_dataset.LeRobotDataset(
+        train_config.repo_id,
+        root=str(root),
+        delta_timestamps=_ut.make_delta_timestamps(
+            model_config.action_horizon, train_config.fps, lags),
+        **kwargs,
+    )
+    splits = build_split_indices(
+        root, model_config.action_horizon, train_config.val_source_episodes, meta=meta,
+    )
+    indices = splits.train if split == "train" else splits.val
+    if len(indices) == 0:
+        raise ValueError(f"split {split!r} has zero valid datapoints")
+
+    import openpi.training.data_loader as _data_loader
+    import openpi.transforms as _transforms
+
+    lr_meta = lerobot_dataset.LeRobotDatasetMetadata(train_config.repo_id, root=str(root))
+    wrapped = chunk_math.BoundaryAwareDataset(dataset, indices)
+    return _data_loader.TransformedDataset(wrapped, [_transforms.PromptFromLeRobotTask(lr_meta.tasks)])
+
+
+def _umi_episode_frames(train_config, split: str):
+    """Yield (episode index, `action` rows (T, 10)) per episode of a split.
+
+    Only `action` is read, mirroring the training path exactly: it carries the
+    poses (cols 0..8) and the gripper (col 9), and `action[u-1]` is the state at
+    tick u. `observation.state` is the same gripper numbers one tick over and is
+    never needed (umi_transforms.make_delta_timestamps).
+
+    Straight from parquet: neither the action stats nor the history stats depend
+    on a pixel, so going through the LeRobot dataset would decode ~41k video
+    frames to compute the same numbers. Seconds instead of hours.
+    """
+    import pandas as pd
+
+    root = pathlib.Path(train_config.dataset_root).resolve()
+    meta = umi_extraction_meta(root)
+    val = set(train_config.val_source_episodes)
+    for idx_str, ep in meta["episodes"].items():
+        i = int(idx_str)
+        if (ep["source_episode"] in val) != (split == "val"):
+            continue
+        path = root / "data" / f"chunk-{i // 1000:03d}" / f"episode_{i:06d}.parquet"
+        df = pd.read_parquet(path, columns=["action"])
+        yield i, np.stack(df["action"].to_numpy()).astype(np.float64)
+
+
+def umi_raw_action_chunks(train_config, action_horizon, *, split: str = "train") -> np.ndarray:
+    """Every raw 7-dim relative action chunk of a split, from parquet only. (N, H, 7).
+
+    Reproduces exactly what training will see, including the two boundary rules:
+    anchors start at t = 1 (tick 0 has no real anchor — see umi_extraction_meta),
+    and a window running past the end repeats the final action, which for these
+    anchor-relative targets means "hold at the final pose". Same padding LeRobot
+    applies, reproduced here so the stats see the training distribution.
+    """
+    from ego2g1.train import umi_transforms as _ut
+
+    tf = _ut.UmiRelativeActions()
+    chunks = []
+    for _, act in _umi_episode_frames(train_config, split):
+        length = len(act)
+        pad = np.repeat(act[-1:], action_horizon, axis=0)
+        padded = np.concatenate([act, pad], axis=0)
+        for t in range(1, length):
+            chunks.append(tf({
+                # anchor = absolute pose at tick t = action[t-1][:9]
+                "observation/pose_history": act[t - 1][None, :9],
+                "observation/targets": padded[t: t + action_horizon],
+            })["actions"])
+    if not chunks:
+        raise ValueError(f"split {split!r} has no episodes")
+    out = np.stack(chunks).astype(np.float64)
+    if out.shape[-1] != 7:
+        raise ValueError(f"built {out.shape[-1]}-dim actions, expected 7")
+    return out
+
+
+def umi_raw_history(train_config, *, split: str = "train", full_only: bool = True) -> np.ndarray:
+    """Every raw (n_lags, 7) history block of a split, from parquet only.
+
+    (N, n_lags, 7). With `full_only` (the default) only anchors whose whole
+    window exists are returned — which is what the PER-LAG stats must be
+    computed over: lag j's mean/std has to come from samples where lag j is
+    real, not from clamped duplicates of the episode's first frame.
+
+    Also feeds the random-history val pool (umi_transforms.UmiStateHistory.pool),
+    where full blocks are likewise the right thing to draw from.
+    """
+    from ego2g1.train import umi_transforms as _ut
+
+    lags = train_config.lag_ticks
+    tf = _ut.UmiStateHistory()
+    span = max(lags)
+    blocks = []
+    for _, act in _umi_episode_frames(train_config, split):
+        length = len(act)
+        # anchor t needs action[t-1-lag] for every lag, i.e. t >= span + 1
+        start = span + 1 if full_only else 1
+        for t in range(start, length):
+            # ONE gather, exactly as the training path does it: pose and gripper
+            # come out of the same rows, so they cannot describe different ticks
+            rows = np.stack([act[t - 1 - l] for l in lags])                  # (n_lags, 10)
+            blocks.append(tf({
+                "observation/pose_history": rows[:, :9],
+                "observation/gripper_history": rows[:, 9:],
+            })["history"])
+    if not blocks:
+        raise ValueError(f"split {split!r} has no episodes")
+    return np.stack(blocks).astype(np.float64)
+
+
+# --------------------------------------------------------------------------
 # EgoRelationTrainConfig: red_block_in_pen_holder_ego and its schema
 # --------------------------------------------------------------------------
 

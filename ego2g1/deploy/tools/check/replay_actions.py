@@ -16,7 +16,7 @@ from ego2g1.deploy.tools.replay_dataset import load_episode
 
 def replay_actions(dataset: str, episode: int = 0, fps: int = 30,
                    horizon: int = 50, ik_iters: int = 25,
-                   posture_cost: float = 0.05, max_step: float = 0.15,
+                   posture_cost: float = 0.05, max_step: float = 0.2094,
                    network_interface: str | None = None,
                    max_pos_speed: float | None = None,
                    dry_run: bool = False, yes: bool = False,

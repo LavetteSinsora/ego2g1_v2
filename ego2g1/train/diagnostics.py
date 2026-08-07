@@ -31,6 +31,11 @@ import openpi.models.model as _model
 import openpi.models.pi0 as _pi0
 import openpi.models.tokenizer as _paligemma_tokenizer
 
+# Duplicated rather than imported from ego2g1.train.umi_transforms: that module
+# imports openpi transforms and the whole relation stack, and diagnostics is
+# imported from the train loop's inner probe. The test suite pins the two equal.
+_HISTORY_SEGMENT = "State history:"
+
 
 class SowingAttention(gemma.Attention):
     """Stock gemma.Attention with the softmax probs sown to `intermediates`.
@@ -237,6 +242,102 @@ def relation_segment_masks(
                     masks[f"text/obj_vec/{nearest.replace(' ', '_')}"][i, s] = 1.0
         elif sentinels.size:
             raise ValueError("found injection sentinels but no `Objects:` segment")
+    return masks
+
+
+def umi_segment_masks(
+    obs: _model.Observation,
+    *,
+    sentinel_id: int,
+    n_lags: int,
+    lag_ticks: tuple[int, ...] = (),
+    tokenizer=None,
+) -> dict[str, np.ndarray]:
+    """Per-sample (B, L) boolean masks over the UMI prompt, one per segment.
+
+    Segments: `text/task` (everything up to the history segment), `text/hist_label`
+    (the words "State history:"), `text/history` (all injection sentinels), and
+    one `text/hist_lag/<ticks>` per lag.
+
+    The per-lag split is the interesting one and is what the ordered injection
+    buys: lag identity is carried ONLY by prompt position (no per-lag text
+    labels), so "which lag is attention actually reading" is otherwise
+    unanswerable. The k-th sentinel is lag k, matching `embed_prefix`'s
+    cumsum-rank gather -- the same rule the injection itself uses, not a parallel
+    assumption.
+
+    A prompt with NO history segment (length 0, the `val_nohist` pool) is legal:
+    every history mask is then empty and `text/task` covers the whole prompt.
+    That is why the missing segment is tolerated here while the relational
+    version raises -- there, a missing `Objects:` segment could only be a bug.
+
+    Assumes a FIXED full-length history, which is what the val pools pin. Under
+    a truncated prompt the trailing per-lag masks are simply empty rather than
+    misattributed, because attribution is by sentinel ORDINAL, not by position.
+    """
+    sp = (tokenizer or _paligemma_tokenizer.PaligemmaTokenizer(48))._tokenizer  # noqa: SLF001
+    ids = np.asarray(obs.tokenized_prompt)
+    valid = (
+        np.asarray(obs.tokenized_prompt_mask).astype(bool)
+        if obs.tokenized_prompt_mask is not None
+        else np.ones(ids.shape, bool)
+    )
+    b, length = ids.shape
+
+    ticks = tuple(lag_ticks) if lag_ticks else tuple(range(n_lags))
+    if len(ticks) != n_lags:
+        raise ValueError(f"lag_ticks has {len(ticks)} entries, expected n_lags={n_lags}")
+
+    names = ["text/task", "text/hist_label", "text/history"]
+    names += [f"text/hist_lag/t-{t}" for t in ticks]
+    masks = {n: np.zeros((b, length), np.float32) for n in names}
+
+    for i in range(b):
+        pieces = [sp.id_to_piece(int(t)).replace("▁", " ") for t in ids[i]]
+        text = "".join(pieces)
+        offs, pos = [], 0
+        for p in pieces:
+            offs.append(pos)
+            pos += len(p)
+        ends = [offs[j] + len(pieces[j]) for j in range(length)]
+
+        def tok_at(char: int) -> int:
+            """Index of the token CONTAINING this character offset.
+
+            Boundaries are converted this way rather than by comparing token
+            START offsets, because sentencepiece pieces carry a leading space
+            (" State"), so the token holding a keyword begins one character
+            before the keyword does and comparing starts would attribute every
+            boundary word to the preceding segment.
+            """
+            for j in range(length):
+                if ends[j] > char:
+                    return j
+            return length
+
+        def span(lo: int, hi: int):
+            j0, j1 = tok_at(lo), tok_at(hi)
+            return np.array([valid[i, j] and j0 <= j < j1 for j in range(length)], bool)
+
+        i_hist = text.find(_HISTORY_SEGMENT)
+        i_act = text.rfind("Action:")
+        if i_act < 0:
+            raise ValueError(f"probe prompt is missing the `Action:` keyword: {text!r}")
+
+        sentinels = np.flatnonzero((ids[i] == sentinel_id) & valid[i])
+        if i_hist < 0:
+            # length-0 prompt: no history segment at all
+            if sentinels.size:
+                raise ValueError("found injection sentinels but no history segment")
+            masks["text/task"][i] = span(0, i_act)
+            continue
+
+        masks["text/task"][i] = span(0, i_hist)
+        masks["text/history"][i] = (ids[i] == sentinel_id) & valid[i]
+        masks["text/hist_label"][i] = span(i_hist, i_act) & ~(ids[i] == sentinel_id)
+        # k-th sentinel == lag k, exactly as embed_prefix's cumsum rank gathers it
+        for k, s in enumerate(sentinels[:n_lags]):
+            masks[f"text/hist_lag/t-{ticks[k]}"][i, s] = 1.0
     return masks
 
 

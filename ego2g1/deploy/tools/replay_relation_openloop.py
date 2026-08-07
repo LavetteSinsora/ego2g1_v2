@@ -145,7 +145,7 @@ class Args(_cli.RobotArgs, _cli.RunArgs, _cli.IKArgs):
     host: str = "127.0.0.1"
     port: int = 8000
     prompt: str | None = None          # override the episode's own recorded task string
-    max_step: float = 0.15             # safety clamp, rad/tick — same default as the runner
+    max_step: float = 0.2094           # safety clamp, rad/tick — same default as the runner
     record_dir: str = "recordings"
     max_chunks: int | None = None      # stop after N chunks regardless of episode length
 

@@ -36,11 +36,28 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True)
 class SafetyLimits:
-    # Max joint motion per 30 Hz action tick. 0.15 rad @ 30 Hz ~ 4.5 rad/s:
-    # brisk but not violent for the G1 arm.
-    max_joint_step: float = 0.15
-    # Absolute joint-velocity ceiling used for the same check when ticks are late.
-    max_joint_vel: float = 5.0
+    # Matched to unitree_deploy's own slew cap (G1ArmConfig.max_pos_speed =
+    # 180*(pi/180)*2 = 2*pi rad/s), so the vendored interpolator is the rate
+    # authority and this clamp only rejects glitches the vendor would also
+    # fight. Was 4.5 rad/s / 0.15 rad, which MEASURABLY clipped legitimate
+    # motion: over 20 put_bottle_in_box_ego episodes (3920 ticks) the worst
+    # real per-tick joint delta is 0.156 rad, i.e. just ABOVE the old cap
+    # (it engaged on 0.05% of ticks). At 0.209 nothing legitimate is touched.
+    #
+    # NOT an equivalent of the vendor cap, deliberately: ours is L-inf per
+    # joint, the vendor's is the L2 norm of the whole 14-vector
+    # (utils/joint_trajcetory_inter.py `joint_pose_distance`). Real motion
+    # runs L2/L-inf ~ 1.48x median, so at the same scalar ours is the looser
+    # of the two — which is the point. The vendor stretches ARRIVAL TIME and
+    # says nothing; this stays as the fast, per-joint, COUNTED gate in front
+    # of it (and the only one that exists at all in dry-run, the replay
+    # tools, and the tests, where no vendor thread runs).
+    max_joint_step: float = 0.2094         # 2*pi rad/s at 30 Hz
+    # Absolute joint-velocity ceiling used for the same check when ticks are
+    # late. `Clamp` takes min(max_joint_step, max_joint_vel*dt) — leaving this
+    # at 5.0 would have silently kept the effective cap at 0.167 rad and made
+    # the max_joint_step bump above a no-op.
+    max_joint_vel: float = 6.2832          # == unitree_deploy max_pos_speed
     # Trip the e-stop if the measured state goes quiet for this long.
     max_state_age: float = 0.2
     # Trip if the camera stops delivering frames — otherwise the policy is fed

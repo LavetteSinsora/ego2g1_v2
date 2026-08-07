@@ -144,6 +144,18 @@ def _preflight(*, auto: bool) -> bool:
               f"        uv sync --group perception-v2\n"
               f"        ...and pass --group perception-v2 to `uv run` too.")
         return False
+    try:
+        import kernels  # noqa: F401
+    except ImportError:
+        print("\n[setup] the `kernels` package is MISSING. transformers then "
+              "silently skips NMS post-processing, hole filling and sprinkle\n"
+              "        removal inside SAM 3. That is not cosmetic for a "
+              "benchmark: it removes real per-frame work, so the numbers\n"
+              "        UNDER-report, and it degrades masks (duplicate "
+              "detections survive, masks keep holes).\n"
+              "        Fix:  uv sync --group perception-v2   "
+              "(or: uv pip install kernels)\n")
+
     if not auto:
         return True
     from huggingface_hub import snapshot_download
@@ -239,10 +251,21 @@ def _vram_reset(device: str) -> None:
 
 
 def _vram(device: str) -> float | None:
+    """PEAK allocated since the last reset."""
     if not str(device).startswith("cuda"):
         return None
     import torch
     return torch.cuda.max_memory_allocated() / 1024 ** 2
+
+
+def _vram_now(device: str) -> float | None:
+    """CURRENTLY allocated. This is the one that matters for a leak test --
+    `max_memory_allocated` is a high-water mark and only ever rises, so it can
+    never show a prune working."""
+    if not str(device).startswith("cuda"):
+        return None
+    import torch
+    return torch.cuda.memory_allocated() / 1024 ** 2
 
 
 def _parallel(gpu_fn, cpu_fn):
@@ -267,13 +290,26 @@ class Sam3:
     carries identity between them.
     """
 
-    def __init__(self, repo: str, device: str, dtype, prompts: list[str]):
+    def __init__(self, repo: str, device: str, dtype, prompts: list[str],
+                 prune: bool = True):
         import torch
         from transformers import Sam3VideoModel, Sam3VideoProcessor
         self.model = Sam3VideoModel.from_pretrained(repo, dtype=dtype).to(device).eval()
         self.processor = Sam3VideoProcessor.from_pretrained(repo)
         self.device, self.torch = device, torch
-        self.session = self.processor.init_video_session(inference_device=device)
+        self.dtype = dtype
+        self._prune = bool(prune)
+        self._frame_idx = -1
+        self._pruned_total = 0
+        # Memory attention reads non-conditioning outputs ONLY for frames
+        # t-1 .. t-(num_maskmem-1). Read the real value rather than assuming 7.
+        trk = getattr(self.model, "tracker_model", None)
+        self.num_maskmem = int(getattr(trk, "num_maskmem", 7) or 7)
+        # The session carries a dtype for everything it stores; leaving it at
+        # the float32 default while the weights are bf16 is what produces
+        # "input and bias type should be the same" on the first conv.
+        self.session = self.processor.init_video_session(
+            inference_device=device, dtype=dtype)
         self.processor.add_text_prompt(self.session, prompts)   # all at once
 
     def step(self, rgb):
@@ -281,11 +317,60 @@ class Sam3:
         from PIL import Image
         inputs = self.processor(images=Image.fromarray(rgb), device=self.device,
                                 return_tensors="pt")
+        # The processor always emits float32 pixel_values. Cast to the weight
+        # dtype explicitly rather than relying on autocast, so the benchmark
+        # times the same arithmetic the deploy loop will run.
+        frame = inputs.pixel_values[0].to(dtype=self.dtype)
         with self.torch.no_grad():
-            out = self.model(inference_session=self.session,
-                             frame=inputs.pixel_values[0])
+            out = self.model(inference_session=self.session, frame=frame)
+        # The raw output knows which frame this was; postprocess_outputs drops it.
+        fi = getattr(out, "frame_idx", None)
+        self._frame_idx = int(fi) if fi is not None else self._frame_idx + 1
+        if self._prune:
+            self.prune()
         return self.processor.postprocess_outputs(
             self.session, out, original_sizes=inputs.original_sizes)
+
+    def prune(self) -> int:
+        """Drop non-conditioning memory entries the model can no longer read.
+
+        `_get_memory_frames` only ever looks up
+        `non_cond_frame_outputs[frame_idx - k]` for k in 1..num_maskmem-1, and
+        conditioning frames separately. Anything older than that window is
+        written once and never read again -- it is the entire ~11.5 MB/frame
+        growth. Deleting it is provably lossless.
+
+        Conditioning frames are LEFT ALONE: they are the long-lived anchors,
+        and they accumulate 16x slower (recondition_every_nth_frame=16).
+        """
+        per_obj = getattr(self.session, "output_dict_per_obj", None)
+        if not per_obj:
+            return 0
+        cutoff = self._frame_idx - self.num_maskmem
+        if cutoff < 0:
+            return 0
+        freed = 0
+        for obj in per_obj.values():
+            nc = obj.get("non_cond_frame_outputs") if isinstance(obj, dict) else None
+            if not nc:
+                continue
+            for fidx in [k for k in nc if isinstance(k, int) and k < cutoff]:
+                del nc[fidx]
+                freed += 1
+        self._pruned_total += freed
+        return freed
+
+    def stored_frames(self) -> tuple[int, int]:
+        """(non_cond entries, cond entries) summed over objects -- the thing
+        that must stop growing."""
+        per_obj = getattr(self.session, "output_dict_per_obj", None) or {}
+        nc = cd = 0
+        for obj in per_obj.values():
+            if not isinstance(obj, dict):
+                continue
+            nc += len(obj.get("non_cond_frame_outputs") or {})
+            cd += len(obj.get("cond_frame_outputs") or {})
+        return nc, cd
 
     @staticmethod
     def masks(res) -> np.ndarray:
@@ -311,7 +396,8 @@ class Orient:
     Preprocessing is 518x518 pad, so crop size barely affects cost.
     """
 
-    def __init__(self, repo_dir: Path, ckpt: str | None, device: str):
+    def __init__(self, repo_dir: Path, ckpt: str | None, device: str,
+                 cast_weights: bool = False, size: int = 518):
         import torch
         sys.path.insert(0, str(repo_dir))
         from vision_tower import VGGT_OriAny_Ref                # noqa: E402
@@ -326,8 +412,17 @@ class Orient:
             ckpt = hf_hub_download(_ORIANY_HF_REPO, _ORIANY_HF_FILE)
         self.model = VGGT_OriAny_Ref(out_dim=900, dtype=dtype, nopretrain=True)
         self.model.load_state_dict(torch.load(ckpt, map_location="cpu"))
-        self.model = self.model.to(device).eval()
-        self.torch, self._pre = torch, preprocess_images
+        # Upstream keeps fp32 PARAMETERS and leans on internal autocast, which
+        # is why this model sits at ~10 GB resident -- by far the largest
+        # consumer on the card. Casting the weights should roughly halve that.
+        # Off by default because it deviates from upstream and the accuracy
+        # impact is unmeasured; --orient-cast-weights turns it on so the VRAM
+        # and latency deltas can be observed directly.
+        self.model = (self.model.to(device=device, dtype=dtype) if cast_weights
+                      else self.model.to(device)).eval()
+        self.torch, self._pre, self.dtype = torch, preprocess_images, dtype
+        # VGGT is patch-14, so the input side must be a multiple of 14.
+        self.size = max(14, int(round(size / 14)) * 14)
 
     @staticmethod
     def crop(rgb, mask, *, pad: float = 0.15):
@@ -347,11 +442,66 @@ class Orient:
             return None
         return Image.fromarray(rgb[y0:y1, x0:x1]).convert("RGB")
 
+    def _preprocess(self, crops, target: int):
+        """Upstream `preprocess_images(mode="pad")` with target_size made a
+        parameter -- it hardcodes 518.
+
+        Faithful to the original: NO mean/std normalisation (just ToTensor,
+        so 0..1), bicubic resize so the LONGEST side is `target` with both
+        sides divisible by 14, then pad to a square with white (value=1.0).
+        Cost scales with token count = (target/14)^2, so 518 -> 336 is about
+        0.42x the work and 518 -> 252 about 0.24x.
+        """
+        from PIL import Image
+        from torchvision import transforms as TF
+        to_tensor = TF.ToTensor()
+        out = []
+        for img in crops:
+            img = img.convert("RGB")
+            w, h = img.size
+            if w >= h:
+                nw = target
+                nh = max(14, round(h * (nw / w) / 14) * 14)
+            else:
+                nh = target
+                nw = max(14, round(w * (nh / h) / 14) * 14)
+            t = to_tensor(img.resize((nw, nh), Image.Resampling.BICUBIC))
+            ph, pw = target - t.shape[1], target - t.shape[2]
+            if ph > 0 or pw > 0:
+                t = self.torch.nn.functional.pad(
+                    t, (pw // 2, pw - pw // 2, ph // 2, ph - ph // 2),
+                    mode="constant", value=1.0)
+            out.append(t)
+        return self.torch.stack(out)
+
     def __call__(self, crops):
-        t = self._pre(list(crops), mode="pad").to(self.model.get_device())
+        """All crops in one forward.
+
+        `VGGT_OriAny_Ref.forward` returns DIFFERENT RANKS for the two paths:
+
+            S >  1:  pose_enc = cat([ref_feat.unsqueeze(1),
+                                     tgt_feat.view(B, S-1, -1)], dim=1)   -> (B, S, D)
+            S == 1:  pose_enc = self.ref_sampler(pose_tokens.view(B*S, C)) -> (B, D)
+
+        Assuming 3-D unconditionally is what produced
+        "argmax(): Expected reduction dim 1 to have non-zero size" -- the
+        reshape collapsed a 2-D result into a degenerate shape. Handle both.
+        """
+        t = (self._pre(list(crops), mode="pad") if self.size == 518
+             else self._preprocess(crops, self.size)).to(
+            device=self.model.get_device(), dtype=self.dtype)
         with self.torch.no_grad():
-            pose = self.model(t.unsqueeze(1))                   # (B, S=1, D)
-        pose = pose.view(pose.shape[0] * pose.shape[1], -1)
+            pose = self.model(t.unsqueeze(1))          # (B, D) here, since S=1
+        if pose.ndim == 3:                             # (B, S, D) -> (B*S, D)
+            pose = pose.reshape(pose.shape[0] * pose.shape[1], -1)
+        elif pose.ndim != 2:
+            raise RuntimeError(f"unexpected pose_enc rank {pose.ndim}, "
+                               f"shape {tuple(pose.shape)}")
+        if pose.shape[-1] < 900:
+            raise RuntimeError(
+                f"pose_enc last dim is {pose.shape[-1]}, expected >=900 "
+                f"(360 az + 180 el + 360 ro). Model built with the wrong "
+                f"out_dim?")
         return {"az": self.torch.argmax(pose[:, 0:360], -1),
                 "el": self.torch.argmax(pose[:, 360:540], -1) - 90,
                 "ro": self.torch.argmax(pose[:, 540:900], -1) - 180}
@@ -429,7 +579,10 @@ def main(
     n: int = 30,
     warmup: int = 5,
     frames: int = 300,
+    prune: bool = True,
     skip_orient: bool = False,
+    orient_cast_weights: bool = False,
+    orient_size: int = 518,
     auto_download: bool = True,
     policy_period_ms: float = 1000.0,
 ):
@@ -484,7 +637,7 @@ def main(
 
     # ---- sam3 (GPU) --------------------------------------------------------
     _vram_reset(dev)
-    sam3 = Sam3(_SAM3_REPO, dev, tdtype, prompt_list)
+    sam3 = Sam3(_SAM3_REPO, dev, tdtype, prompt_list, prune=prune)
     res = sam3.step(rgb_l)
     found = len(res.get("object_ids", []))
     print(f"\n[detect] {found} object(s) on the first frame"
@@ -495,8 +648,10 @@ def main(
               "--prompts objects.")
 
     print(f"\n--- sam3  (GPU, one session, {len(prompt_list)} prompts, "
-          f"detect+track) ---")
-    print(f"  pushing {frames} frames to expose memory-bank growth...")
+          f"detect+track, prune={'ON' if prune else 'OFF'}) ---")
+    print(f"  memory window: num_maskmem={sam3.num_maskmem} "
+          f"(non-cond entries older than this are unreachable)")
+    print(f"  pushing {frames} frames...")
     per, vtrace = [], []
     for i in range(frames):
         f, _ = read()
@@ -506,7 +661,8 @@ def main(
         _sync(dev)
         per.append(time.perf_counter() - t0)
         if i % 25 == 0:
-            vtrace.append((i, _vram(dev)))
+            nc, cd = sam3.stored_frames()
+            vtrace.append((i, _vram_now(dev), nc, cd))
     pf = np.asarray(per) * 1e3
     b = max(1, len(pf) // 10)
     print(f"  first 10 : mean {pf[:10].mean():.1f} ms")
@@ -518,12 +674,28 @@ def main(
           f"p95 {p95:.1f}  p99 {p99:.1f}  max {st.max():.1f} ms")
     R["sam3"] = float(p95)
     if vtrace and vtrace[0][1] is not None:
-        print("  vram     : " + "  ".join(f"{i}:{v:.0f}MB" for i, v in vtrace[:8])
+        print("  vram(now): " + "  ".join(f"{i}:{v:.0f}MB" for i, v, _, _ in vtrace[:8])
               + (" ..." if len(vtrace) > 8 else ""))
-        if vtrace[-1][1] > vtrace[0][1] * 1.5:
-            print(f"  [warn] VRAM {vtrace[0][1]:.0f} -> {vtrace[-1][1]:.0f} MB "
-                  f"and still climbing. Long episodes will OOM -- re-run with "
-                  f"--frames 3000 before trusting a multi-minute rollout.")
+        print("  stored   : " + "  ".join(f"{i}:{nc}nc/{cd}cd"
+                                          for i, _, nc, cd in vtrace[:8])
+              + (" ..." if len(vtrace) > 8 else ""))
+        first, last = vtrace[0][1], vtrace[-1][1]
+        # Compare the last two samples, not first-vs-last: startup allocation
+        # always rises, and what matters is whether it is STILL rising at the end.
+        tail_growth = (vtrace[-1][1] - vtrace[-2][1]) if len(vtrace) >= 2 else 0.0
+        span = vtrace[-1][0] - vtrace[-2][0] if len(vtrace) >= 2 else 1
+        per_frame = tail_growth / max(span, 1)
+        print(f"  growth   : {first:.0f} -> {last:.0f} MB overall; "
+              f"tail {per_frame:+.2f} MB/frame over the last {span} frames")
+        R["vram_per_frame"] = per_frame
+        if per_frame > 0.5:
+            print(f"  [FAIL] still growing at the tail. At {per_frame:.1f} MB/frame "
+                  f"the card fills in ~{(23500 - last) / max(per_frame, 1e-6):.0f} "
+                  f"more frames. Pruning did not bound it -- investigate what "
+                  f"else the session retains before trusting a long rollout.")
+        elif prune:
+            print("  [OK] flat at the tail -- pruning bounds the session. "
+                  "Confirm with --frames 3000 before signing this off.")
 
     # ---- join (CPU) --------------------------------------------------------
     masks = Sam3.masks(sam3.step(rgb_l))
@@ -536,7 +708,9 @@ def main(
     if oriany is not None:
         try:
             t0 = time.perf_counter()
-            orient = Orient(oriany, None, dev)
+            orient = Orient(oriany, None, dev,
+                            cast_weights=orient_cast_weights,
+                            size=orient_size)
             _sync(dev)
             vm = _vram(dev)
             print(f"\n[setup] Orient Anything V2 loaded in "
@@ -547,8 +721,8 @@ def main(
                 _vram_reset(dev)
                 w, s, e = _time(lambda: _quiet(orient, crops),
                                 n=max(5, n // 3), warmup=warmup, device=dev)
-                R["orient"] = _report(f"orient  (GPU, {len(crops)} crops, one "
-                                      f"batched forward)", w, s, e,
+                R["orient"] = _report(f"orient  (GPU, {len(crops)} crops @ "
+                                      f"{orient.size}px, one batched forward)", w, s, e,
                                       vram=_vram(dev))
                 w, s, e = _time(lambda: _quiet(orient, crops[:1]),
                                 n=max(5, n // 3), warmup=2, device=dev)
@@ -571,16 +745,21 @@ def main(
     # ---- perception_step: one iteration of the async loop -------------------
     print("\n" + "=" * 72)
 
-    def gpu_side():
-        out = sam3.step(read()[0])
+    def gpu_side(frame):
+        out = sam3.step(frame)
         if orient is not None and "orient" in R:
-            cs = [c for c in (Orient.crop(rgb_l, m) for m in Sam3.masks(out)) if c]
+            cs = [c for c in (Orient.crop(frame, m) for m in Sam3.masks(out)) if c]
             if cs:
                 _quiet(orient, cs)
         return out
 
     def step_all():
-        out, d = _parallel(gpu_side, lambda: sgbm.estimate(*read()))
+        # ONE camera read, handed to both arms. Reading separately in each
+        # arm serialises them behind HeadCamera's lock, which measures lock
+        # contention rather than GPU||CPU overlap.
+        left, right = read()
+        out, d = _parallel(lambda: gpu_side(left),
+                           lambda: sgbm.estimate(left, right))
         join_to_3d(Sam3.masks(out), d, calib.K_left)
 
     w, s, e = _time(step_all, n=max(5, n // 2), warmup=3, device=dev)
@@ -589,8 +768,9 @@ def main(
                         vram=_vram(dev))
 
     def serial():                                   # prices the GPU||CPU overlap
-        out = gpu_side()
-        d = sgbm.estimate(*read())
+        left, right = read()
+        out = gpu_side(left)
+        d = sgbm.estimate(left, right)
         join_to_3d(Sam3.masks(out), d, calib.K_left)
 
     w, s, e = _time(serial, n=max(5, n // 2), warmup=3, device=dev)

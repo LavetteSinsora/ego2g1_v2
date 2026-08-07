@@ -20,8 +20,10 @@ Now the invariants are constructor-owned and no caller can forget them:
   * Ctrl-C inside `stream()` damps BEFORE propagating.
 
 The clamp deliberately stays in the loop for dataset replays too: a
-legitimate replay never hits 0.15 rad/tick (even the old ~26 rad/s²
-extractions move ~0.07 rad/tick at 30 Hz), so the A/B semantics of rung 6
+legitimate replay never hits 0.209 rad/tick (measured over 20
+put_bottle_in_box_ego episodes / 3920 ticks: median 0.024, p99 0.101,
+worst 0.156 rad — and that is the OLD unsmoothed extraction), so the
+A/B semantics of rung 6
 are untouched — but a corrupt row or wrong-episode indexing now becomes lag
 plus a printed count instead of a lurch. `clamped_ticks` is surfaced so any
 interference is visible, not silent.

@@ -818,6 +818,368 @@ def _relation_attention_probe(config: _config.EgoRelationTrainConfig, state, val
     return payload
 
 
+# ---------------------------------------------------------------------------
+# UmiTrainConfig: state-history tokens + 7-dim rotvec actions, one arm
+# ---------------------------------------------------------------------------
+
+
+@at.typecheck
+def umi_train_step(
+    config: _openpi_config.TrainConfig,
+    ego_config: _config.UmiTrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
+    """Stock train_step + the weighted flow loss and the decompositions.
+
+    No auxiliary loss term: this config has no grasp head (the gripper is
+    continuous, so there is no binary to calibrate), which makes the total loss
+    exactly the weighted flow loss.
+    """
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+
+    grip = ego_config.gripper_dims
+
+    @at.typecheck
+    def loss_fn(model: _model.BaseModel, rng: at.KeyArrayLike, observation, actions):
+        chunked_loss, aux = model.compute_loss_with_aux(
+            rng, observation, actions, train=True, gripper_dims=grip
+        )
+        return jnp.mean(chunked_loss), (chunked_loss, aux)
+
+    train_rng = jax.random.fold_in(rng, state.step)
+    observation, actions = batch
+
+    diff_state = nnx.DiffState(0, config.trainable_filter)
+    (loss, (chunked_loss, aux)), grads = nnx.value_and_grad(
+        loss_fn, argnums=diff_state, has_aux=True
+    )(model, train_rng, observation, actions)
+
+    params = state.params.filter(config.trainable_filter)
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+
+    nnx.update(model, new_params)
+    new_params = nnx.state(model)
+
+    new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
+    if state.ema_decay is not None:
+        new_state = dataclasses.replace(
+            new_state,
+            ema_params=jax.tree.map(
+                lambda old, new: state.ema_decay * old + (1 - state.ema_decay) * new, state.ema_params, new_params
+            ),
+        )
+
+    kernel_params = nnx.state(
+        model,
+        nnx.All(
+            nnx.Param,
+            nnx.Not(nnx_utils.PathRegex(".*/(bias|scale|pos_embedding|input_embedding)")),
+            lambda _, x: x.value.ndim > 1,
+        ),
+    )
+    _img = nnx_utils.PathRegex(".*img.*")
+    _llm = nnx_utils.PathRegex(".*llm.*")
+    _expert1 = nnx_utils.PathRegex(".*llm.*_1.*")
+    grad_groups = {
+        "grad_norm/siglip": _img,
+        "grad_norm/prefix_expert": nnx.All(_llm, nnx.Not(_expert1)),
+        "grad_norm/action_expert": _expert1,
+        # the history encoder (`relation_encoder` by name, see umi_transforms):
+        # if its gradient is orders below the rest, the injected tokens are not
+        # being learned
+        "grad_norm/history_encoder": nnx_utils.PathRegex(".*relation_encoder.*"),
+    }
+
+    info = {
+        "loss": loss,
+        "loss/flow": jnp.mean(chunked_loss),
+        "grad_norm": optax.global_norm(grads),
+        "param_norm": optax.global_norm(kernel_params),
+        **{k: optax.global_norm(grads.filter(f)) for k, f in grad_groups.items()},
+        **{f"loss/{k}": v for k, v in _slot_bucket_means(chunked_loss, config.model.action_horizon).items()},
+    }
+    if "delta_norm" in aux:
+        # rotation_deg is THE canary: gemma.RMSNorm keeps only direction, so
+        # rotating the sentinel is the injection's entire effect. Healthy =
+        # arctan(alpha) ~ 45 deg at alpha=1.
+        info["history/rotation_deg"] = aux["rotation_deg"]
+        # most-recent vs most-stale lag. Near 0 means the encoder emits the same
+        # token whatever the lag, i.e. the window carries no temporal information
+        # at all -- which the relational config's mean-pairwise metric could not
+        # distinguish from a healthy smooth sequence.
+        info["history/endpoint_sep_deg"] = aux["endpoint_sep_deg"]
+        info["history/alpha"] = aux["alpha"]
+        info["history/base_norm"] = aux["base_norm"]
+        info["history/delta_norm"] = aux["delta_norm"]
+        info["history/text_norm"] = aux["text_norm"]
+    return new_state, info
+
+
+def main_umi(config: _config.UmiTrainConfig):
+    stock = _load_stock_train_module()
+    stock.init_logging()
+
+    from ego2g1.train import dataset as _umi_dataset
+    from ego2g1.train import norm as _norm
+
+    model_config_base = config.model_config()
+    meta = _umi_dataset.assert_umi_dataset_compatible(
+        config.dataset_root, config.expected_config_hash, model_config_base.action_horizon,
+        config.fps, config.hand, config.n_lags, max(config.lag_ticks),
+    )
+    stats_dir = config.assets_dirs / config.repo_id
+    stats = _norm.load_umi(stats_dir)
+
+    # The shared-anchor invariant, checked as a number rather than trusted: both
+    # the action chunk and the state history are expressed in the frame of
+    # pose_history[0], so lag 0's pose dims must be identically zero. If they are
+    # not, the two inputs are in different frames and the model would still train
+    # to a plausible-looking loss.
+    if _norm.lag_zero_pose_is_nonzero(stats):
+        raise ValueError(
+            "lag 0's pose stats are not identically zero: the action frame and the "
+            "history frame have come apart. Recompute stats with this code version "
+            "(`python -m ego2g1.train.compute_norm_stats --umi`)."
+        )
+
+    # Loss weights are DERIVED from the stats artifact, never hard-coded, so they
+    # track the data: variance-normalize every dim, then apply w_gripper. Unlike
+    # the relational config the gripper is normalized like everything else here,
+    # so w_gripper means what it reads.
+    weights = _data_config.loss_dim_weights(
+        stats, config.action_dim_actual, config.gripper_dims, config.w_gripper
+    )
+    model_config = dataclasses.replace(model_config_base, loss_dim_weights=weights)
+    logging.info(f"loss_dim_weights (mean 1): {[round(w, 4) for w in weights]}")
+    logging.info(f"history: {config.n_lags} tokens at ticks {list(config.lag_ticks)} "
+                 f"(t-0 .. t-{max(config.lag_ticks) / config.fps:.2f}s), "
+                 f"length probs {list(config.history_len_probs)}")
+    logging.info(f"history alpha (injection size as a fraction of the base): "
+                 f"{config.history_alpha} -> {math.degrees(math.atan(config.history_alpha)):.1f} deg rotation")
+
+    data_cfg = _data_config.create_umi_data_config(
+        config, model_config, stats_dir=stats_dir,
+        history_length_probs=config.history_len_probs,
+    )
+    train_config = _to_openpi_train_config(config, data_cfg)
+
+    if config.batch_size % jax.device_count() != 0:
+        raise ValueError(f"batch_size {config.batch_size} % devices {jax.device_count()} != 0")
+    jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
+
+    rng = jax.random.key(config.seed)
+    train_rng, init_rng = jax.random.split(rng)
+
+    mesh = sharding.make_mesh(config.fsdp_devices)
+    data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
+        train_config.checkpoint_dir, keep_period=config.keep_period,
+        overwrite=config.overwrite, resume=config.resume,
+    )
+    best_manager = ocp.CheckpointManager(
+        epath.Path(train_config.checkpoint_dir) / "best",
+        item_handlers={"assets": _checkpoints.CallbackHandler(), "params": ocp.PyTreeCheckpointHandler()},
+        options=ocp.CheckpointManagerOptions(
+            max_to_keep=1,
+            best_fn=lambda metrics: float(metrics["val_loss"]),
+            best_mode="min",
+            keep_checkpoints_without_metrics=False,
+            create=True,
+            async_options=ocp.AsyncOptions(timeout_secs=7200),
+        ),
+    )
+    stock.init_wandb(train_config, resuming=resuming, enabled=config.wandb_enabled)
+
+    _stamp.write_stamp(train_config.checkpoint_dir, config, meta["config_hash"])
+    _norm.save_umi(train_config.checkpoint_dir / "assets_ego2g1", stats)
+    _stamp.write_stamp(train_config.checkpoint_dir / "best", config, meta["config_hash"])
+    _norm.save_umi(train_config.checkpoint_dir / "best" / "assets_ego2g1", stats)
+
+    torch_dataset = _umi_dataset.create_umi_dataset(config, model_config, split="train")
+    transformed = _data_loader.transform_dataset(torch_dataset, data_cfg)
+    torch_loader = _data_loader.TorchDataLoader(
+        transformed,
+        local_batch_size=config.batch_size // jax.process_count(),
+        sharding=data_sharding,
+        shuffle=True,
+        num_workers=config.num_workers,
+        seed=config.seed,
+    )
+    data_loader = _data_loader.DataLoaderImpl(data_cfg, torch_loader)
+    data_iter = iter(data_loader)
+    batch = next(data_iter)
+    logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+
+    # Validation pools. All four draw the SAME ticks in the same order with the
+    # same fixed rng, and all PIN the history length to full: they are asking
+    # about the history's CONTENT, and letting the length vary too would
+    # confound two questions.
+    #   val            full history, in order         — the deployed condition
+    #   val_permuted   lag order shuffled             — is lag ORDER read at all?
+    #   val_random     another frame's history        — dead reckoning detector
+    #   val_nohist     the segment removed entirely   — is the channel used at all?
+    #
+    # val_permuted is a GATE, not a diagnostic: lag identity is carried only by
+    # prompt position (RoPE), with no per-lag text labels. If permuting barely
+    # moves the loss, that decision was wrong and the labels are required.
+    val_pools: dict[str, list] = {}
+    if config.eval_interval > 0 and config.val_source_episodes:
+        val_dataset = _umi_dataset.create_umi_dataset(config, model_config, split="val")
+        history_pool = _umi_dataset.umi_raw_history(config, split="val", full_only=True)
+        full = config.n_lags
+        pool_kwargs = {
+            "val": {"history_fixed_len": full},
+            "val_permuted": {"history_fixed_len": full, "permute_history": True},
+            "val_random": {"history_fixed_len": full, "history_pool": history_pool},
+            "val_nohist": {"history_fixed_len": 0},
+        }
+        for prefix, kwargs in pool_kwargs.items():
+            pool_cfg = _data_config.create_umi_data_config(
+                config, model_config, stats_dir=stats_dir, **kwargs
+            )
+            val_loader = _data_loader.TorchDataLoader(
+                _data_loader.transform_dataset(val_dataset, pool_cfg),
+                local_batch_size=config.batch_size // jax.process_count(),
+                sharding=data_sharding,
+                shuffle=True,
+                num_batches=config.eval_num_batches,
+                num_workers=0,
+                seed=config.seed,
+            )
+            val_pools[prefix] = list(iter(_data_loader.DataLoaderImpl(pool_cfg, val_loader)))
+        logging.info(f"Loaded {config.eval_num_batches} fixed val batches x {len(val_pools)} pools "
+                     f"({len(val_dataset)} datapoints from {len(config.val_source_episodes)} episodes; "
+                     f"random-history pool {history_pool.shape})")
+    elif config.eval_interval > 0:
+        logging.warning("eval_interval > 0 but val_source_episodes is empty — validation disabled")
+
+    images_to_log = [
+        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+    ]
+    wandb.log({"camera_views": images_to_log}, step=0)
+
+    train_state, train_state_sharding = stock.init_train_state(train_config, init_rng, mesh, resume=resuming)
+    jax.block_until_ready(train_state)
+    if resuming:
+        train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+
+    ptrain_step = jax.jit(
+        functools.partial(umi_train_step, train_config, config),
+        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        out_shardings=(train_state_sharding, replicated_sharding),
+        donate_argnums=(1,),
+    )
+
+    grip = config.gripper_dims
+
+    def _eval_step(rng, state, batch):
+        params = state.ema_params if state.ema_params is not None else state.params
+        model = nnx.merge(state.model_def, params)
+        model.eval()
+        observation, actions = batch
+        chunked_loss, _aux = model.compute_loss_with_aux(
+            rng, observation, actions, train=False, gripper_dims=grip
+        )
+        return {"val/loss": jnp.mean(chunked_loss),
+                **{f"val/{k}": v for k, v in _slot_bucket_means(chunked_loss, config.action_horizon).items()}}
+
+    peval_step = jax.jit(
+        _eval_step,
+        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        out_shardings=replicated_sharding,
+    )
+    eval_rng = jax.random.key(config.seed + 1)
+
+    start_step = int(train_state.step)
+    pbar = tqdm.tqdm(range(start_step, config.num_train_steps), initial=start_step,
+                     total=config.num_train_steps, dynamic_ncols=True)
+
+    infos = []
+    for step in pbar:
+        with sharding.set_mesh(mesh):
+            train_state, info = ptrain_step(train_rng, train_state, batch)
+        infos.append(info)
+        if step % config.log_interval == 0:
+            stacked = common_utils.stack_forest(infos)
+            reduced = jax.device_get(jax.tree.map(jnp.mean, stacked))
+            pbar.write(f"Step {step}: " + ", ".join(f"{k}={v:.4f}" for k, v in reduced.items()))
+            wandb.log(reduced, step=step)
+            infos = []
+        batch = next(data_iter)
+        if val_pools and config.eval_interval > 0 and (step % config.eval_interval == 0 or step == config.num_train_steps - 1):
+            val_reduced = {}
+            for prefix, batches in val_pools.items():
+                with sharding.set_mesh(mesh):
+                    val_infos = [peval_step(jax.random.fold_in(eval_rng, i), train_state, vb)
+                                 for i, vb in enumerate(batches)]
+                reduced = jax.device_get(jax.tree.map(jnp.mean, common_utils.stack_forest(val_infos)))
+                val_reduced.update({k.replace("val/", f"{prefix}/", 1): v for k, v in reduced.items()})
+            # The two numbers that decide whether the history feature earned its
+            # keep, logged as ratios so they are readable at a glance rather than
+            # by eyeballing four curves.
+            base = float(val_reduced["val/loss"])
+            if base > 0:
+                val_reduced["history/permuted_over_real"] = float(val_reduced["val_permuted/loss"]) / base
+                val_reduced["history/random_over_real"] = float(val_reduced["val_random/loss"]) / base
+                val_reduced["history/nohist_over_real"] = float(val_reduced["val_nohist/loss"]) / base
+            pbar.write(f"Step {step} [val]: " + ", ".join(f"{k}={v:.4f}" for k, v in val_reduced.items()))
+            wandb.log(val_reduced, step=step)
+            _save_best(best_manager, train_state, data_loader, step, base)
+        if val_pools and config.probe_interval > 0 and (step % config.probe_interval == 0 or step == config.num_train_steps - 1):
+            wandb.log(_umi_attention_probe(config, train_state, val_pools["val"][0]), step=step)
+        if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+
+    logging.info("Waiting for checkpoint managers to finish")
+    checkpoint_manager.wait_until_finished()
+    best_manager.wait_until_finished()
+
+
+def _umi_attention_probe(config: _config.UmiTrainConfig, state, val_batch) -> dict:
+    """Per-prompt-segment and per-CAMERA attention allocation of the action tokens.
+
+    The camera split is free: `diagnostics.token_groups` emits one `img/<slot>`
+    group per entry in `obs.images`, so the acting wrist, the static context view
+    and the masked-out idle slot are already separate groups. That answers "is
+    the context camera being used at all", which for this setup is the same
+    question as "is the head-camera stand-in working".
+
+    Segments come from the tokenized prompt itself, so nothing has to be threaded
+    through the Observation. Eager, on a small probe batch, using EMA params like
+    eval. The probe batch comes from the `val` pool, whose history length is
+    pinned to full — which is what makes the per-lag attribution well defined.
+    """
+    from ego2g1.train import diagnostics as _diagnostics
+
+    params = state.ema_params if state.ema_params is not None else state.params
+    model = nnx.merge(state.model_def, params)
+    model.eval()
+    obs, actions = jax.tree.map(lambda x: x[: config.probe_batch_size], val_batch)
+    out = _diagnostics.attention_allocation(
+        model, obs, actions,
+        segment_masks=_diagnostics.umi_segment_masks(
+            obs, sentinel_id=config.model_config().relation_sentinel_id,
+            n_lags=config.n_lags, lag_ticks=config.lag_ticks,
+        ),
+    )
+    per_layer = out["per_layer"]
+    payload = {}
+    for g, name in enumerate(out["group_names"]):
+        key = name.replace("/", "_")
+        payload[f"attn/{key}"] = float(per_layer[:, g].mean())
+        payload[f"attn_first_layer/{key}"] = float(per_layer[0, g])
+        payload[f"attn_last_layer/{key}"] = float(per_layer[-1, g])
+    payload["attn/entropy"] = float(out["entropy_per_layer"].mean())
+    return payload
+
+
 if __name__ == "__main__":
     import sys
 
@@ -826,5 +1188,8 @@ if __name__ == "__main__":
     if "--relation" in sys.argv:
         sys.argv.remove("--relation")
         main_relation(tyro.cli(_config.EgoRelationTrainConfig))
+    elif "--umi" in sys.argv:
+        sys.argv.remove("--umi")
+        main_umi(tyro.cli(_config.UmiTrainConfig))
     else:
         main(tyro.cli(_config.Ego2G1TrainConfig))

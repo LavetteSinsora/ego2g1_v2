@@ -259,11 +259,11 @@ class RelationPrompt(_transforms.DataTransformFn):
 
         out["relations"] = np.stack([rows[i] for i in row_order]).astype(np.float32)
         out["state"] = grasp.astype(np.float32)
-        out["prompt"] = self.build_prompt(grasp, order)
+        out["prompt"] = self.build_prompt(task, grasp, order)
         out.pop("observation/state", None)
         return out
 
-    def build_prompt(self, grasp, order) -> str:
+    def build_prompt(self, task: str, grasp, order) -> str:
         marker = f"<<<control_mode>>> {self.control_mode} <<<control_mode>>>"
         words = []
         for name, g in zip(self.hands, grasp, strict=True):
@@ -278,9 +278,9 @@ class RelationPrompt(_transforms.DataTransformFn):
             words.append(f"{name.capitalize()} hand: {GRASP_WORDS[value]}")
         hands = " ".join(words)
         if not self.include_objects:
-            return f"Task: {self.task} {marker} {hands} Action: "
+            return f"Task: {task} {marker} {hands} Action: "
         objects = ", ".join(f"{self.object_prompt_names[i]} {RELATION_SENTINEL}" for i in order)
-        return f"Task: {self.task} {marker} {hands} Objects: {objects} Action: "
+        return f"Task: {task} {marker} {hands} Objects: {objects} Action: "
 
 
 @dataclasses.dataclass(frozen=True)

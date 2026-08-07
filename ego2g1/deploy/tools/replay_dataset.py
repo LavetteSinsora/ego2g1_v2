@@ -156,8 +156,9 @@ class Args(_cli.RobotArgs, _cli.RunArgs):
     ik_iters: int = 40
     ik_tol: float = 0.02
     hands: bool = True
-    max_joint_step: float = 0.15           # session.py's per-tick clamp; a
+    max_joint_step: float = 0.2094         # session.py's per-tick clamp; a
                                            # legitimate replay never hits it
+                                           # (worst measured real tick 0.156)
 
 
 def main(args: Args) -> None:

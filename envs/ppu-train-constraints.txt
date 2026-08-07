@@ -1,0 +1,38 @@
+# envs/ppu-train-constraints.txt — the proven PPU training core.
+#
+# Applied automatically by envs/ppu-train.sh via UV_CONSTRAINT / PIP_CONSTRAINT,
+# so every install in a training shell is capped by it without remembering a
+# flag. A constraints file installs NOTHING; it only limits what a resolver may
+# choose, and only for packages something is already trying to install.
+#
+# Verified 2026-08-07 on PPU SDK 2.1.0 / driver 2.1.0, 16x PPU-ZW810E:
+#   jax backend=gpu devices=16, torch devices=16, full openpi import gauntlet.
+
+# --- JAX: PPU builds only. PyPI's same-numbered wheels are NVIDIA-only and
+#     fall back to CPU SILENTLY. Full local-version strings, because a bare
+#     `jax==0.7.2` also matches the .oe/.ce variants and PEP 440 ordering picks
+#     whichever sorts highest — which is how the torchvision sdist got chosen.
+jax==0.7.2+v0.1.0.ppu2.1.0.oe
+jaxlib==0.7.2+v0.1.0.ppu2.1.0.oe
+jax-cuda12-plugin==0.7.2+v0.1.0.ppu2.1.0.oe
+jax-cuda12-pjrt==0.7.2+v0.1.0.ppu2.1.0.oe
+
+# --- numpy: jax 0.7.2 REQUIRES >=2.0 (this is why openpi's own numpy<2 pin
+#     cannot be honoured here, and why openpi is installed --no-deps). Upper
+#     bound is scipy's: it wants <2.8.0. Consequence: any compiled package from
+#     the container image that uses numpy's C API must be shadowed by a venv
+#     copy built for numpy 2 — scikit-learn and pandas are the two that matter.
+numpy>=2.0,<2.8
+scipy<1.18
+
+# --- torch/torchvision: provided by the container image and inherited via
+#     --system-site-packages. The PPU index has SDISTS ONLY for these, so never
+#     let a resolver try to install them; pinned here so a transitive
+#     requirement cannot pull a different one into the venv.
+torch==2.9.0
+torchvision==0.24.0
+
+# --- datasets: newer versions write parquet the training env cannot read back
+#     and break the pinned lerobot API. See the repo pyproject for the full
+#     reasoning; this must match what the extraction environment writes.
+datasets==3.6.0

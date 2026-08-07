@@ -39,6 +39,19 @@ SUPPORTED_FEATURES = frozenset({
     # informational
     "loss_gripper_weight",
     "grasp_head",
+    # --- UmiTrainConfig: state-history tokens + 7-dim rotvec actions, one arm ---
+    # recent MEASURED TCP poses + gripper, z-scored PER LAG and injected as
+    # prompt tokens (`action_norm_scheme` and `relative_eef_rotvec_actions`
+    # above are shared with the relational config)
+    "state_history",
+    # continuous gripper: deploy must send an aperture, not an open/closed step
+    "continuous_gripper",
+    # which camera goes in which slot, and the static-context assumption that
+    # licenses base_0_rgb's spatial augmentation
+    "wrist_cameras",
+    # informational
+    "history_len_probs",
+    "inject_ordered",
 })
 
 

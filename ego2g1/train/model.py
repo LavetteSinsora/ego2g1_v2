@@ -75,6 +75,13 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
     # (safeguard 2). Dimensionless and used directly -- there is no offline
     # measurement to get wrong, because the base is read live in embed_prefix.
     relation_alpha: float = 1.0
+    # The injected rows are an ORDERED sequence (UmiTrainConfig's state
+    # history) rather than an unordered set (the relational config's objects).
+    # Only changes which separation canary is logged: an ordered sequence of
+    # smoothly-varying states SHOULD have similar adjacent rows, so the object
+    # config's "mean pairwise angle, large is healthy" reads backwards for it.
+    # Reports the most-recent-vs-most-stale angle instead.
+    inject_ordered: bool = False
     # Per-dim loss weights over the D_real action dims, mean 1. None = uniform.
     # A tuple (not an array) so the frozen dataclass stays hashable.
     loss_dim_weights: tuple[float, ...] | None = None
@@ -137,6 +144,10 @@ class Ego2G1Pi0Config(_pi0_config.Pi0Config):
             flags["n_objects"] = self.n_objects
             flags["relation_hidden"] = self.relation_hidden
             flags["relation_sentinel_id"] = self.relation_sentinel_id
+        # only when set, so an unordered (relational) checkpoint's stamp is
+        # byte-identical to the ones written before this field existed
+        if self.inject_ordered:
+            flags["inject_ordered"] = True
         return flags
 
 
@@ -162,6 +173,26 @@ def _mean_pairwise_angle(v):
     return jnp.where(jnp.min(norms) > 1e-6, mean_ang, 0.0)
 
 
+def _endpoint_angle(v):
+    """Angle (degrees) between the FIRST and LAST rows of `v` (b, n, emb).
+
+    The ordered-sequence counterpart of `_mean_pairwise_angle`: for a state
+    history it asks how far the most recent tick's embedding has been separated
+    from the most stale one. Near 0 means the encoder is producing the same
+    token whatever the lag, i.e. the window carries no temporal information at
+    all; the mean pairwise angle would not distinguish that from a healthy
+    smooth sequence.
+
+    Same zero-init caveat: at step 0 every delta is exactly 0, so report 0
+    rather than the meaningless 90 deg that arccos(0) would give.
+    """
+    a, z = v[:, 0, :], v[:, -1, :]
+    na, nz = jnp.linalg.norm(a, axis=-1), jnp.linalg.norm(z, axis=-1)
+    cos = jnp.sum(a * z, axis=-1) / jnp.maximum(na * nz, 1e-6)
+    ang = jnp.mean(jnp.degrees(jnp.arccos(jnp.clip(cos, -1.0, 1.0))))
+    return jnp.where(jnp.minimum(jnp.min(na), jnp.min(nz)) > 1e-6, ang, 0.0)
+
+
 class Ego2G1Pi0(_pi0.Pi0):
     def __init__(self, config: Ego2G1Pi0Config, rngs: nnx.Rngs):
         super().__init__(config, rngs=rngs)
@@ -170,6 +201,7 @@ class Ego2G1Pi0(_pi0.Pi0):
         self.rtc_d_max = config.rtc_d_max
         self.n_objects = config.n_objects
         self.relation_sentinel_id = config.relation_sentinel_id
+        self.inject_ordered = config.inject_ordered
         self.loss_dim_weights = config.loss_dim_weights
 
         # Built only for the relational config, so the 30-dim config's param tree
@@ -363,17 +395,27 @@ class Ego2G1Pi0(_pi0.Pi0):
             # arctan(alpha) is the healthy value; relation_v1 sat at 0.2 deg.
             aux["rotation_deg"] = jnp.degrees(jnp.arctan(jnp.mean(delta_norm) / jnp.maximum(base_norm, 1e-6)))
 
-            # End-to-end: how far apart are the object tokens attention actually
-            # receives? This is what 0.2 deg of rotation destroyed -- the encoder
-            # separated the objects by 60-76 deg and the sum collapsed them to 0.2.
-            # Splitting the two makes the failure legible: delta_sep stays healthy
-            # while token_sep goes to zero iff the injection is too small.
-            injected = prefix_tokens[:, -length:, :].astype(jnp.float32)
-            base_vec = jnp.sum(jnp.where(slot[..., None], injected, 0.0), axis=1) / jnp.maximum(
-                jnp.sum(slot, axis=1, keepdims=True), 1.0
-            )                                                          # (b, emb) mean sentinel token
-            aux["delta_sep_deg"] = _mean_pairwise_angle(delta)
-            aux["token_sep_deg"] = _mean_pairwise_angle(base_vec[:, None, :] + delta)
+            # How distinguishable are the injected tokens? Which question that is
+            # depends on whether the rows are a SET or a SEQUENCE.
+            if self.inject_ordered:
+                # A SEQUENCE (a state history). Adjacent rows should be similar
+                # -- the arm moves smoothly -- so "mean pairwise angle, large is
+                # healthy" reads exactly backwards here. What matters is whether
+                # the two ENDS of the window are told apart at all.
+                aux["endpoint_sep_deg"] = _endpoint_angle(delta)
+            else:
+                # A SET (objects). End-to-end: how far apart are the object
+                # tokens attention actually receives? This is what 0.2 deg of
+                # rotation destroyed -- the encoder separated the objects by
+                # 60-76 deg and the sum collapsed them to 0.2. Splitting the two
+                # makes the failure legible: delta_sep stays healthy while
+                # token_sep goes to zero iff the injection is too small.
+                injected = prefix_tokens[:, -length:, :].astype(jnp.float32)
+                base_vec = jnp.sum(jnp.where(slot[..., None], injected, 0.0), axis=1) / jnp.maximum(
+                    jnp.sum(slot, axis=1, keepdims=True), 1.0
+                )                                                      # (b, emb) mean sentinel token
+                aux["delta_sep_deg"] = _mean_pairwise_angle(delta)
+                aux["token_sep_deg"] = _mean_pairwise_angle(base_vec[:, None, :] + delta)
         return chunked_loss, aux
 
     @at.typecheck

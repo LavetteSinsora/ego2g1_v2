@@ -1,6 +1,6 @@
 """Training configs: every knob in one frozen dataclass per experiment family.
 
-Two families share `_CommonTrainFields` (the training-loop mechanics that have
+Three families share `_CommonTrainFields` (the training-loop mechanics that have
 nothing to do with the representation):
 
 - `Ego2G1TrainConfig`     — 30-dim absolute-EEF-6d + Revo2-6-motor actions,
@@ -8,8 +8,12 @@ nothing to do with the representation):
 - `EgoRelationTrainConfig` — 14-dim relative-EEF-rotvec + binary-gripper actions,
                             object-relation vectors injected as prompt tokens
                             (HumanEgo-style; docs/datasets.md).
+- `UmiTrainConfig`        — UMI: one acting arm, 7-dim relative-EEF-rotvec
+                            + CONTINUOUS gripper, two wrist cameras, no scene
+                            perception; recent TCP poses injected as prompt
+                            tokens.
 
-Both produce stock openpi objects but are NOT registered in openpi's _CONFIGS —
+All produce stock openpi objects but are NOT registered in openpi's _CONFIGS —
 ego2g1 entrypoints take a dataclass directly through tyro.
 
 Field ORDER differs from a single flat dataclass, but `config_hash()` serializes
@@ -459,6 +463,240 @@ class EgoRelationTrainConfig(_CommonTrainFields):
             "model_space_clamp": {"required": False, "value": self.model_space_clamp},
             "loss_gripper_weight": {"required": False, "value": self.w_gripper},
             "grasp_head": {"required": False, "value": self.grasp_head, "w_aux": self.w_aux},
+            **{k: {"required": False, "value": v}
+               for k, v in self.model_config().feature_flags().items()},
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class UmiTrainConfig(_CommonTrainFields):
+    """UMI single-arm wrist-camera policy (`red_block_on_yellow_block_umi`).
+
+    Differs from both siblings in every part of the interface, which is why it
+    is a third dataclass rather than a mode flag on either:
+
+    cameras — TWO. The acting arm's wrist camera, and the static arm's camera
+              standing in for the head camera this setup does not have.
+    state   — no absolute proprioception and no scene perception. A window of
+              recent MEASURED TCP poses, each expressed in the current pose's
+              frame, plus the gripper, injected as one prompt token per lag
+              (ego2g1.train.umi_transforms).
+    action  — 7 dims: 3 translation + 3 rotation-vector relative to the anchor
+              TCP, plus a CONTINUOUS gripper. One arm only; the other holds
+              its pose and contributes only its camera.
+
+    No grasp head. It existed to give a calibrated probability where a BINARY
+    gripper's flow sample is ambiguous; with a continuous gripper there is no
+    binary to be calibrated about, and defining the head's label would require
+    picking a closed-threshold whose arbitrariness is exactly the problem.
+    """
+
+    name: str = "umi_wrist"
+    exp_name: str = "umi"
+
+    # --- data ---
+    dataset_root: str = dataclasses.field(default_factory=lambda: str(
+        _paths.data_dir() / "lerobot_datasets" / "ego2g1" / "red_block_on_yellow_block_umi"))
+    # names the norm-stats assets dir (assets/<name>/<repo_id>/); see docs/datasets.md
+    repo_id: str = "ego2g1/red_block_on_yellow_block_umi"
+    # This dataset carries no extraction sidecar of its own, so
+    # ego2g1.train.dataset.umi_extraction_meta SYNTHESIZES one by hashing
+    # info.json's schema-defining fields. None skips the assert.
+    expected_config_hash: str | None = None
+    fps: int = 30
+    # The single acting arm. Names the acting camera feature; the other arm
+    # holds its pose and contributes only its camera.
+    hand: str = "right"
+    video_backend: str | None = None
+    # Every 8th of the 117 episodes (12%), as `source_episode` strings. The
+    # adapter maps LeRobot episode i -> episode_{i} (one recording each).
+    val_source_episodes: tuple[str, ...] = tuple(
+        f"red_block_on_yellow_block_umi/episode_{i}" for i in range(7, 117, 8)
+    )
+
+    # --- model ---
+    action_dim: int = 32  # pi05_base padded width
+    # 3 translation + 3 rotation-vector + 1 continuous gripper
+    action_dim_actual: int = 7
+    action_horizon: int = 50
+    control_mode: str = _transforms.CONTROL_MODE_EEF
+
+    # --- state history ---
+    # Number of PAST lags. Total injected tokens is history_lags + 1, because
+    # lag 0 (the anchor's own tick) is a token too: its pose part is
+    # structurally zero but it carries the CURRENT gripper, which
+    # nothing else in this config would deliver.
+    history_lags: int = 5
+    # Ticks between lags. At fps=30, stride 3 spans lag 0 .. t-0.5 s — enough
+    # of the approach to read velocity, against a 1.67 s action horizon.
+    history_stride: int = 3
+    # P(history length = j) for j in 0..history_lags+1 inclusive, so the tuple
+    # is history_lags + 2 long. Truncation is always from the STALE end (see
+    # WristStateHistory), which is what keeps "j-th token == lag j" exact and
+    # is forced by relying on RoPE for lag identity.
+    #
+    # NOT uniform, deliberately: deployment runs at full length essentially
+    # always, so uniform would spend most of training on a regime that barely
+    # occurs. The mass on short lengths exists to train the episode-start
+    # regime — ~2.5% of frames, and the ones where the policy decides how to
+    # initiate a motion — and to double as a graded history dropout.
+    #
+    # This one knob subsumes both intended operating modes:
+    #   MODE_A_LENGTH_PROBS  gripper only, no motion history
+    #   the default          full history, with the short regime trained
+    history_len_probs: tuple[float, ...] = (0.0, 0.05, 0.05, 0.05, 0.05, 0.10, 0.70)
+    history_hidden: int = 512    # GeGLU hidden width of the history encoder
+    # Injected token size as a FRACTION of the sentinel embedding it is added
+    # to, read live at injection time. 1.0 = the token is rotated arctan(1) =
+    # 45 deg. See ego2g1.train.relation.RelationEncoder for why the relative
+    # form exists and what the absolute one broke.
+    history_alpha: float = 1.0
+    # Which camera slot the ACTING arm's wrist camera occupies. Must be a wrist
+    # slot: openpi gates crop/rotate augmentation on the substring "wrist", and
+    # that augmentation would put an unmodelled rotation between the acting
+    # image and the anchor-relative action labels.
+    acting_slot: str = "right_wrist_0_rgb"
+    # The context camera goes to base_0_rgb and therefore DOES get spatial
+    # augmentation — correct only while the arm carrying it holds still.
+    context_is_static: bool = True
+
+    # --- normalization ---
+    action_norm_scheme: Literal["per_slot_quantile"] = "per_slot_quantile"
+    model_space_clamp: float | None = 10.0
+    # Per-lag z-score clip, in sigmas. Insurance against a tracking glitch at
+    # deployment time.
+    state_norm_clip: float = 5.0
+
+    # --- loss ---
+    # Gripper weight, applied on VARIANCE-NORMALIZED dims (data_config
+    # .loss_dim_weights). Unlike the relational config, the gripper here is
+    # normalized alongside every other dim, so this number means what it reads:
+    # w_gripper=3 gives the gripper 3/(6+3) = 33% of the loss.
+    w_gripper: float = 3.0
+
+    # --- train-time RTC (unused here; kept so model_config stays uniform) ---
+    rtc_training: bool = False
+    rtc_d_max: int = 16
+
+    # History length distribution for the no-motion-history baseline: always
+    # exactly one token, the anchor's own tick, carrying the current gripper.
+    MODE_A_LENGTH_PROBS: ClassVar[tuple[float, ...]] = (0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.action_dim_actual != 7:
+            raise ValueError(
+                f"action_dim_actual={self.action_dim_actual} != 7 "
+                "(3 translation + 3 rotation-vector + 1 continuous gripper, one arm)"
+            )
+        if self.hand not in ("left", "right"):
+            raise ValueError(f"hand={self.hand!r} must be 'left' or 'right'")
+        if len(self.history_len_probs) != self.n_lags + 1:
+            raise ValueError(
+                f"history_len_probs has {len(self.history_len_probs)} entries, expected "
+                f"{self.n_lags + 1} (one per achievable length 0..{self.n_lags})"
+            )
+        if any(p < 0 for p in self.history_len_probs):
+            raise ValueError(f"history_len_probs={self.history_len_probs} has a negative entry")
+        total = sum(self.history_len_probs)
+        if not 0.999 <= total <= 1.001:
+            raise ValueError(f"history_len_probs sums to {total}, expected 1.0")
+        if self.model_space_clamp is not None and self.model_space_clamp <= 1.0:
+            raise ValueError(f"model_space_clamp={self.model_space_clamp} must be > 1 (or None)")
+        if self.state_norm_clip <= 1.0:
+            raise ValueError(f"state_norm_clip={self.state_norm_clip} must be > 1")
+        if self.w_gripper <= 0.0:
+            raise ValueError(f"w_gripper={self.w_gripper} must be > 0")
+
+    # --- derived ---
+
+    @property
+    def n_lags(self) -> int:
+        """Number of injected history tokens: the past lags plus lag 0."""
+        return self.history_lags + 1
+
+    @property
+    def lag_ticks(self) -> tuple[int, ...]:
+        from ego2g1.train import umi_transforms as _ut
+
+        return _ut.lag_ticks(self.history_lags, self.history_stride)
+
+    @property
+    def history_dim(self) -> int:
+        """Per-lag vector width: 3 translation + 3 rotation-vector + 1 gripper."""
+        from ego2g1.train import umi_transforms as _ut
+
+        return _ut.HISTORY_DIM
+
+    @property
+    def gripper_dims(self) -> tuple[int, ...]:
+        """The action dim carrying the continuous gripper, at the TAIL."""
+        return (6,)
+
+    def model_config(self) -> _model.Ego2G1Pi0Config:
+        # The injection fields are still spelled n_objects / relation_* — for
+        # this config they mean "number of history tokens" and "width of one
+        # history vector". Left alone deliberately: renaming them would touch
+        # the relational path for no behavioural gain (ego2g1.train
+        # .umi_transforms module docstring).
+        return _model.Ego2G1Pi0Config(
+            pi05=True,
+            action_dim=self.action_dim,
+            action_horizon=self.action_horizon,
+            action_dim_actual=self.action_dim_actual,
+            rtc_training=self.rtc_training,
+            rtc_d_max=self.rtc_d_max,
+            discrete_state_input=True,   # unused: our prompt builder owns the string
+            n_objects=self.n_lags,
+            relation_dim=self.history_dim,
+            relation_hidden=self.history_hidden,
+            grasp_head=False,
+            state_dim=1,
+            relation_alpha=self.history_alpha,
+            # the injected rows are an ORDERED sequence, not an unordered set:
+            # report the most-recent-vs-most-stale separation instead of the
+            # object config's mean pairwise angle.
+            inject_ordered=True,
+        )
+
+    def weight_loader(self) -> _weight_loaders.WeightLoader:
+        # NOT the stock loader: pi05_base has no relation_encoder, and stock
+        # _merge_params silently DROPS reference params that do not match
+        # ".*lora.*". See ego2g1/train/weight_loader.py.
+        return _ego_weight_loader.Ego2G1CheckpointWeightLoader(self.weight_loader_params_path)
+
+    def feature_flags(self) -> dict:
+        """Checkpoint stamp (ego2g1.stamp): serving code must declare support
+        for every flag with `required: True`."""
+        return {
+            # serving MUST invert the per-(slot, dim) quantile normalization
+            "action_norm_scheme": {"required": True, "scheme": self.action_norm_scheme},
+            # serving MUST build the history rows and run the encoder
+            "state_history": {
+                "required": True,
+                "n_lags": self.n_lags,
+                "history_dim": self.history_dim,
+                "lag_ticks": list(self.lag_ticks),
+                "clip": self.state_norm_clip,
+                # measured, never commanded — see umi_transforms' docstring
+                "pose_source": "measured",
+            },
+            # serving MUST decode rotation-VECTOR rotations, not 6d
+            "relative_eef_rotvec_actions": {"required": True},
+            # serving MUST send a continuous gripper, not a binary open/closed
+            "continuous_gripper": {"required": True, "dims": list(self.gripper_dims)},
+            # serving MUST place the two cameras in these slots
+            "wrist_cameras": {
+                "required": True,
+                "acting_slot": self.acting_slot,
+                "context_slot": "base_0_rgb",
+                "context_is_static": self.context_is_static,
+            },
+            "control_mode_prompt": {"required": True, "mode": self.control_mode},
+            # train-side only; informational
+            "model_space_clamp": {"required": False, "value": self.model_space_clamp},
+            "loss_gripper_weight": {"required": False, "value": self.w_gripper},
+            "history_len_probs": {"required": False, "value": list(self.history_len_probs)},
             **{k: {"required": False, "value": v}
                for k, v in self.model_config().feature_flags().items()},
         }

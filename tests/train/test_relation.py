@@ -178,6 +178,25 @@ def test_no_relations_pool_drops_the_object_segment():
     assert "Left hand:" in r["prompt"] and "Action:" in r["prompt"]
 
 
+@pytest.mark.parametrize("include_objects", [True, False])
+def test_task_comes_from_the_sample_prompt(include_objects):
+    """REGRESSION: `build_prompt` used to read `self.task` while `__call__`
+    resolved the sample's `prompt` into a local it then discarded — so under
+    `prompt_from_task=True` (which is how create_relation_data_config runs it,
+    with no `task=` fallback set) the whole task segment came out EMPTY. Every
+    other prompt test passes `task=` explicitly, which is exactly why it hid.
+
+    The fallback still applies, but only when the sample carries no prompt."""
+    pb = _rt.RelationPrompt(object_prompt_names=("a", "b"), include_objects=include_objects,
+                            task="fallback")
+    r = pb({"observation/state": _state(2), "prompt": "put the red block on the yellow block"})
+    assert r["prompt"].startswith("Task: put the red block on the yellow block ")
+    assert "fallback" not in r["prompt"]
+
+    r = pb({"observation/state": _state(2)})
+    assert r["prompt"].startswith("Task: fallback ")
+
+
 def test_grasp_words_follow_the_binary():
     names = ("a",)
     for g, word in ((0.0, "open"), (1.0, "closed")):

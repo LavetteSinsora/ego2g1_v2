@@ -17,4 +17,6 @@ MUJOCO_LOG.TXT
 # generated dashboards / recordings
 *_dashboard.html
 recordings/
+# extraction outputs (regenerable from data/raw_hdf5 — see data_extraction/README.md)
+data_extraction/out/
 *.egg-info/

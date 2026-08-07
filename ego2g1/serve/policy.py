@@ -61,7 +61,9 @@ def resolve_run_dir(checkpoint_dir: str | pathlib.Path) -> pathlib.Path:
     return checkpoint_dir  # let read_stamp raise its diagnostic
 
 
-def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig | _config.EgoRelationTrainConfig:
+def config_from_stamp(
+    stamp: dict,
+) -> _config.Ego2G1TrainConfig | _config.EgoRelationTrainConfig | _config.UmiTrainConfig:
     """Rebuild the training config from a stamp (single source of truth).
     optimizer/lr_schedule are dropped (not needed at serving); JSON lists are
     restored to the tuples the dataclass expects.
@@ -76,6 +78,15 @@ def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig | _config.EgoRel
         cfg_dict.pop(k, None)
 
     config_class = stamp.get("config_class", "Ego2G1TrainConfig")
+    if config_class == "UmiTrainConfig":
+        for k in ("val_source_episodes", "history_len_probs"):
+            if k in cfg_dict and isinstance(cfg_dict[k], list):
+                cfg_dict[k] = tuple(cfg_dict[k])
+        # No legacy-default backfill: this config family has carried every field
+        # its __post_init__ relies on since its introduction, so there is no
+        # pre-UmiTrainConfig checkpoint missing any of them.
+        return _config.UmiTrainConfig(**cfg_dict)
+
     if config_class == "EgoRelationTrainConfig":
         for k in ("hands", "val_source_episodes", "objects", "object_prompt_names"):
             if k in cfg_dict and isinstance(cfg_dict[k], list):
@@ -190,6 +201,44 @@ def resolve_relation_norm_assets(checkpoint_dir, run_dir, train_config, assets_d
     )
 
 
+def resolve_umi_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir=None) -> pathlib.Path:
+    """-> directory holding umi_stats.npz (ego2g1.train.norm.UMI_FILENAME).
+
+    Same single-artifact shape and the same resolution order as
+    `resolve_relation_norm_assets`; see that docstring for why each step exists.
+    """
+    from ego2g1.train import norm as _norm
+
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    run_dir = pathlib.Path(run_dir)
+
+    if assets_dir is not None:
+        d = pathlib.Path(assets_dir)
+        if not (d / _norm.UMI_FILENAME).exists():
+            raise FileNotFoundError(f"--assets-dir {d} is missing {_norm.UMI_FILENAME}")
+        return d
+
+    own_ck = checkpoint_dir / "assets_ego2g1"
+    own_run = run_dir / "assets_ego2g1"
+    train_assets = train_config.assets_dirs / train_config.repo_id
+    searched = []
+
+    for d in (own_ck, own_run, train_assets):
+        searched.append(d / _norm.UMI_FILENAME)
+        if (d / _norm.UMI_FILENAME).exists():
+            if d == train_assets:
+                print(f"WARNING: falling back to the training assets dir {train_assets} (the checkpoint "
+                      "does not carry its own copy). Confirm these stats are the ones this checkpoint "
+                      "trained with — they are not pinned to it.")
+            return d
+
+    raise FileNotFoundError(
+        f"{_norm.UMI_FILENAME} not found. Searched:\n  " + "\n  ".join(str(p) for p in searched) +
+        "\nRun `python -m ego2g1.train.compute_norm_stats --umi` from the openpi root, "
+        "or pass --assets-dir."
+    )
+
+
 class Ego2G1Policy(_policy.Policy):
     """openpi Policy + RTC. Accepts optional `prev_chunk` / `d` in the request.
 
@@ -213,12 +262,24 @@ class Ego2G1Policy(_policy.Policy):
     """
 
     def __init__(self, model, *, rtc: _rtc.RTCConfig, rtc_training: bool,
-                 action_horizon: int, relation_mode: bool = False, **kwargs):
+                 action_horizon: int, relation_mode: bool = False,
+                 no_prefix_reason: str | None = None, **kwargs):
         super().__init__(model, **kwargs)
         self._rtc = rtc
         self._rtc_training = rtc_training
         self._action_horizon = action_horizon
         self._relation_mode = relation_mode
+        # `relation_mode` keeps its historical meaning and message; UmiTrainConfig
+        # checkpoints pass their own reason. Both say the same thing: the prefix's
+        # ride through a non-30-dim input-transform chain has never been verified,
+        # and this codebase's stamping mechanism exists so an unverified serving
+        # path fails loud rather than silently wrong.
+        self._no_prefix_reason = no_prefix_reason or (
+            "RTC prefix continuation is not implemented for relational "
+            "(EgoRelationTrainConfig) checkpoints — only the plain (no-prefix) "
+            "sampler is supported. See docs/relation_deploy_plan.md §8."
+            if relation_mode else None
+        )
 
         self._sample_guided = nnx_utils.module_jit(
             model.sample_actions_guided,
@@ -243,12 +304,8 @@ class Ego2G1Policy(_policy.Policy):
         d = int(np.clip(d, 0, max(0, n_real - 1)))
 
         has_prefix = prev_chunk is not None and n_real > 0
-        if has_prefix and self._relation_mode:
-            raise NotImplementedError(
-                "RTC prefix continuation is not implemented for relational "
-                "(EgoRelationTrainConfig) checkpoints — only the plain (no-prefix) "
-                "sampler is supported. See docs/relation_deploy_plan.md §8."
-            )
+        if has_prefix and self._no_prefix_reason is not None:
+            raise NotImplementedError(self._no_prefix_reason)
         sampler = _rtc.select_sampler(
             rtc_training=self._rtc_training,
             has_prefix=has_prefix,
@@ -317,6 +374,12 @@ class Ego2G1Policy(_policy.Policy):
 # 30-dim scheme's two existing values.
 RELATION_CONTROL_MODE_METADATA = "relation_eef"
 
+# Same idea for UmiTrainConfig: the metadata control_mode signals the ACTION
+# SPACE to the client (7-dim single-arm anchor-relative rotvec + continuous
+# gripper), which is distinct from both the 30-dim scheme's "end effector" /
+# "joint" and from the relational config's 14-dim space.
+UMI_CONTROL_MODE_METADATA = "umi_eef"
+
 
 def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | None = None,
                   assets_dir: str | pathlib.Path | None = None,
@@ -334,8 +397,69 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
 
     rtc = rtc if rtc is not None else _rtc.RTCConfig()
     is_relation = isinstance(train_config, _config.EgoRelationTrainConfig)
+    is_umi = isinstance(train_config, _config.UmiTrainConfig)
+    no_prefix_reason = None
 
-    if is_relation:
+    if is_umi:
+        stats_dir = resolve_umi_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
+        data_cfg = _data_config.create_umi_data_config(
+            train_config, model_config, stats_dir=stats_dir,
+            # Serving must be deterministic and must use everything it has: no
+            # length draw, full history. Truncation at deploy is the RUNTIME's
+            # job — it happens only when the pose ring buffer genuinely has not
+            # filled yet (episode start, or after a re-arm cleared it), and it is
+            # expressed by sending fewer rows, not by sampling here.
+            history_fixed_len=train_config.n_lags,
+        )
+        # create_umi_data_config returns norm_stats={} BY DESIGN (see its
+        # docstring): the real normalization (NormalizeHistory,
+        # PerSlotQuantizeActions/Inverse) already lives inside
+        # model_transforms.inputs/outputs, so Normalize/Unnormalize must NOT be
+        # inserted here.
+        policy_transforms = [
+            transforms.InjectDefaultPrompt(default_prompt),
+            *data_cfg.data_transforms.inputs,
+            *data_cfg.model_transforms.inputs,
+        ]
+        policy_output_transforms = [
+            *data_cfg.model_transforms.outputs,
+            *data_cfg.data_transforms.outputs,
+        ]
+        no_prefix_reason = (
+            "RTC prefix continuation is not implemented for UMI (UmiTrainConfig) "
+            "checkpoints — only the plain (no-prefix) sampler is supported. The "
+            "reanchor-prefix math for rotvec deltas under per-slot-quantized "
+            "actions is a separate design, the same gap the relational config has."
+        )
+        ego_metadata = {
+            "hands": [train_config.hand],
+            "action_horizon": train_config.action_horizon,
+            "action_dim": train_config.action_dim_actual,
+            "fps": train_config.fps,
+            "control_mode": UMI_CONTROL_MODE_METADATA,
+            "rtc_training": bool(train_config.rtc_training),
+            "rtc": {
+                "enabled": rtc.enabled,
+                "overlap": rtc.overlap,
+                "max_guidance_weight": rtc.max_guidance_weight,
+                "schedule": rtc.prefix_attention_schedule.value,
+                "use_vjp": rtc.use_vjp,
+                "num_steps": rtc.num_steps,
+            },
+            # Everything the robot client needs to build the request without
+            # importing ego2g1.train (which pulls in JAX).
+            "hand": train_config.hand,
+            "n_lags": train_config.n_lags,
+            "lag_ticks": list(train_config.lag_ticks),
+            "history_dim": train_config.history_dim,
+            "acting_slot": train_config.acting_slot,
+            "gripper_dims": list(train_config.gripper_dims),
+            # MEASURED poses, never commanded — the training data has no commanded
+            # pose at all, so feeding commanded ones at deploy shifts the history
+            # distribution by the arm's tracking error.
+            "pose_source": "measured",
+        }
+    elif is_relation:
         stats_dir = resolve_relation_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
         data_cfg = _data_config.create_relation_data_config(
             train_config, model_config, stats_dir=stats_dir,
@@ -419,6 +543,7 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
         rtc_training=bool(train_config.rtc_training),
         action_horizon=train_config.action_horizon,
         relation_mode=is_relation,
+        no_prefix_reason=no_prefix_reason,
         transforms=policy_transforms,
         output_transforms=policy_output_transforms,
         metadata={

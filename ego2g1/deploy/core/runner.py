@@ -472,7 +472,8 @@ class Args:
     dry_run: bool = False              # mock executor + static camera, no robot
     skip_latency_check: bool = False   # ONLY for offline debugging; never live
     # --- safety ---
-    max_joint_step: float = 0.15
+    max_joint_step: float = 0.2094     # 2*pi rad/s at 30 Hz — unitree_deploy's
+                                       # own max_pos_speed (see safety.py)
     max_state_age: float = 0.2
     max_starvation: float = 2.0
     max_track_err: float = 0.10        # metres of IK tracking error before the e-stop

@@ -218,6 +218,149 @@ def check_relation_stats_sanity(stats: RelationNormStats, max_abs_norm: float = 
     return problems
 
 
+# --------------------------------------------------------------------------
+# UmiTrainConfig artifacts (per-lag state history + 7-dim rotvec actions)
+# --------------------------------------------------------------------------
+
+UMI_FILENAME = "umi_stats.npz"
+
+# Lag 0's pose dims are the anchor expressed in its own frame, i.e. exactly
+# zero for every sample. Structurally constant, not a data bug -- the ONE
+# exemption `check_umi_stats_sanity` grants, so that any other zero-variance
+# dim still fails loud.
+LAG0_POSE_DIMS = (0, 1, 2, 3, 4, 5)
+
+
+@dataclasses.dataclass(frozen=True)
+class UmiNormStats:
+    """The two stats grids the UMI config needs, in ONE artifact.
+
+    action_q01/action_q99 : (H, 7) per-(slot, dim) quantiles.
+        The WHOLE action normalization -- no pooled step underneath. Measured on
+        red_block_on_yellow_block_umi, translation std at slot 49 is 24-36x that
+        at slot 0, so a pooled scheme would leave slot 0 at roughly 1/30th unit
+        scale even though early slots are the only ones that ever execute, and
+        E001's floored per-slot gain saturates at 1/c = 10 -- not enough. The
+        gripper is normalized here TOO, unlike the relational config, because a
+        continuous gripper has a real quantile span where a binary one does not.
+
+    history_mean/history_std : (n_lags, 7) z-score stats, PER LAG.
+        Per-lag, not pooled across lags -- see umi_transforms.NormalizeHistory
+        for why this deliberately inverts the relational config's rule.
+    """
+
+    action_q01: np.ndarray       # (H, 7)
+    action_q99: np.ndarray       # (H, 7)
+    history_mean: np.ndarray     # (n_lags, 7)
+    history_std: np.ndarray      # (n_lags, 7)
+    gripper_dims: tuple[int, ...]
+    provenance: dict
+
+    def __post_init__(self):
+        if self.action_q01.shape != self.action_q99.shape:
+            raise ValueError(f"q01 {self.action_q01.shape} != q99 {self.action_q99.shape}")
+        if self.history_mean.shape != self.history_std.shape:
+            raise ValueError(
+                f"history mean {self.history_mean.shape} != std {self.history_std.shape}"
+            )
+
+    @property
+    def action_span(self) -> np.ndarray:
+        """The Normalize denominator, with openpi's exact epsilon."""
+        return self.action_q99 - self.action_q01 + 1e-6
+
+
+def save_umi(directory: pathlib.Path | str, stats: UmiNormStats) -> None:
+    directory = pathlib.Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        directory / UMI_FILENAME,
+        action_q01=stats.action_q01,
+        action_q99=stats.action_q99,
+        history_mean=stats.history_mean,
+        history_std=stats.history_std,
+        gripper_dims=np.asarray(stats.gripper_dims, dtype=np.int64),
+        provenance=json.dumps(stats.provenance),
+    )
+
+
+def load_umi(directory: pathlib.Path | str) -> UmiNormStats:
+    path = pathlib.Path(directory) / UMI_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found — run `python -m ego2g1.train.compute_norm_stats --umi` "
+            "(the UMI config needs the per-slot quantile grid and the per-lag history stats)"
+        )
+    with np.load(path, allow_pickle=False) as z:
+        return UmiNormStats(
+            action_q01=np.asarray(z["action_q01"], dtype=np.float64),
+            action_q99=np.asarray(z["action_q99"], dtype=np.float64),
+            history_mean=np.asarray(z["history_mean"], dtype=np.float64),
+            history_std=np.asarray(z["history_std"], dtype=np.float64),
+            gripper_dims=tuple(int(d) for d in z["gripper_dims"]),
+            provenance=json.loads(str(z["provenance"])),
+        )
+
+
+def check_umi_stats_sanity(stats: UmiNormStats) -> list[str]:
+    """Returns human-readable violations (empty = pass).
+
+    Every one is a data bug rather than a tuning knob:
+    - a zero-span (slot, dim) means that dim never moves at that slot, which for
+      a 7-dim all-live action space (gripper included, since it is continuous
+      here) should not happen;
+    - a zero history std means a lag/dim pair is constant across the dataset.
+      Exactly one such block is legitimate and expected -- lag 0's six pose
+      dims, which are the anchor in its own frame. Anything else means either
+      the lag grid collapsed (stride 0, or a dataset shorter than the window) or
+      the gripper column is dead.
+    """
+    problems = []
+    span = stats.action_q99 - stats.action_q01
+    n_slots, d_real = span.shape
+    for d in range(d_real):
+        dead = np.flatnonzero(span[:, d] <= DEGENERATE_EPS)
+        if dead.size:
+            problems.append(
+                f"actions dim {d}: zero quantile span at slots {dead[:5].tolist()}"
+                f"{' ...' if dead.size > 5 else ''} ({dead.size}/{n_slots} slots)"
+            )
+
+    n_lags = stats.history_std.shape[0]
+    for lag in range(n_lags):
+        for d in range(stats.history_std.shape[1]):
+            if stats.history_std[lag, d] > DEGENERATE_EPS:
+                continue
+            if lag == 0 and d in LAG0_POSE_DIMS:
+                continue   # structural: the anchor expressed in its own frame
+            problems.append(
+                f"history lag {lag} dim {d}: ~zero std (constant across the dataset)"
+            )
+    if lag_zero_pose_is_nonzero(stats):
+        problems.append(
+            "history lag 0 pose dims are not identically zero — the anchor is not "
+            "row 0 of the history, so the action frame and the history frame have "
+            "come apart (umi_transforms.UmiRelativeActions reads poses[0])"
+        )
+    if max(stats.gripper_dims, default=-1) >= d_real:
+        problems.append(f"gripper_dims {stats.gripper_dims} out of range for D_real={d_real}")
+    return problems
+
+
+def lag_zero_pose_is_nonzero(stats: UmiNormStats, tol: float = 1e-6) -> bool:
+    """THE shared-anchor invariant, checked as a number.
+
+    Both the action chunk and the state history are expressed in the frame of
+    `pose_history[0]`. That makes lag 0's pose part identically zero — so if its
+    mean or std is ever nonzero, the two inputs are no longer in a common frame
+    and the model is being fed an inconsistent geometry that would still train
+    to a plausible loss.
+    """
+    mean0 = np.abs(stats.history_mean[0, list(LAG0_POSE_DIMS)])
+    std0 = np.abs(stats.history_std[0, list(LAG0_POSE_DIMS)])
+    return bool(np.any(mean0 > tol) or np.any(std0 > tol))
+
+
 def check_stats_sanity(
     pooled: dict[str, _normalize.NormStats],
     per_slot: PerSlotStats,

@@ -189,7 +189,143 @@ def create_data_config(
 
 
 # --------------------------------------------------------------------------
-# EgoRelationTrainConfig stack
+# UmiTrainConfig stack
+# --------------------------------------------------------------------------
+
+
+def create_umi_data_config(
+    train_config,
+    model_config,
+    *,
+    stats_dir: pathlib.Path | str,
+    skip_norm_stats: bool = False,
+    history_length_probs: tuple[float, ...] | None = None,
+    history_fixed_len: int | None = None,
+    permute_history: bool = False,
+    history_pool: np.ndarray | None = None,
+) -> _config.DataConfig:
+    """Assemble the UMI DataConfig (`UmiTrainConfig`).
+
+    Placement notes, all load-bearing:
+
+    - `norm_stats={}` makes openpi's mandatory `Normalize` step a NO-OP. It is
+      inserted unconditionally by `transform_dataset` and cannot be removed
+      without forking that function; an empty dict is the supported way to opt
+      out, because Normalize only touches keys present in the stats. Neither of
+      our normalizations (per-(slot, dim) quantile, per-lag z-score) is
+      expressible as openpi's per-dim NormStats anyway.
+    - Both normalizers live in `model_transforms`, so `compute_norm_stats` --
+      which applies repack + data_transforms only -- observes RAW actions and
+      RAW history.
+    - `UmiSplitGathered` runs FIRST and is the only place that knows how
+      `make_delta_timestamps` packed the backward history and the forward chunk
+      into one `action` gather.
+    - `UmiRelativeActions` and `UmiStateHistory` both read `pose_history[0]` as
+      the anchor. One source, so the action frame and the history frame cannot
+      come apart; `norm.lag_zero_pose_is_nonzero` checks that invariant as a
+      number once the stats exist.
+
+    The history-length arguments select a pool:
+      train         -> history_length_probs = train_config.history_len_probs
+      val           -> history_fixed_len = n_lags  (full; the reference curve)
+      val_permuted  -> ... + permute_history=True
+      val_random    -> ... + history_pool=<other samples' rows>
+      val_nohist    -> history_fixed_len = 0
+    Val pools pin the length deliberately: they are asking about the history's
+    CONTENT, and letting the length vary too would confound two questions.
+    """
+    from ego2g1.train import norm as _norm
+    from ego2g1.train import umi_transforms as _ut
+
+    stats_dir = pathlib.Path(stats_dir)
+    n_lags = train_config.n_lags
+
+    model_inputs = []
+    model_outputs = []
+    if not skip_norm_stats:
+        stats = _norm.load_umi(stats_dir)
+        d_real = train_config.action_dim_actual
+        model_inputs.append(_ut.NormalizeHistory(
+            mean=stats.history_mean, std=stats.history_std, clip=train_config.state_norm_clip,
+        ))
+        if train_config.action_norm_scheme != "per_slot_quantile":
+            raise NotImplementedError(
+                f"action_norm_scheme={train_config.action_norm_scheme!r} is declared in the "
+                "config but only 'per_slot_quantile' is wired here"
+            )
+        # gripper_dims=() on purpose: the gripper is CONTINUOUS here, so it has a
+        # real quantile span and is normalized like every other dim. The
+        # relational config exempts its gripper only because a quantile map of a
+        # two-point distribution is meaningless.
+        model_inputs.append(_ut.PerSlotQuantizeActions(
+            q01=stats.action_q01[:, :d_real], q99=stats.action_q99[:, :d_real],
+            gripper_dims=(), clamp=train_config.model_space_clamp,
+        ))
+        model_outputs.append(_ut.PerSlotQuantizeActionsInverse(
+            q01=stats.action_q01[:, :d_real], q99=stats.action_q99[:, :d_real],
+            gripper_dims=(),
+        ))
+
+    model_inputs += [
+        _transforms.ResizeImages(224, 224),
+        _ut.RelationTokenizePrompt(max_token_len=model_config.max_token_len),
+        _transforms.PadStatesAndActions(model_config.action_dim),
+    ]
+
+    data_transforms = _transforms.Group(
+        inputs=[
+            _ut.UmiSplitGathered(n_lags=n_lags),
+            _ut.UmiRelativeActions(),
+            _ut.UmiStateHistory(
+                length_probs=history_length_probs,
+                fixed_len=history_fixed_len,
+                permute=permute_history,
+                pool=history_pool,
+            ),
+            _ut.UmiPrompt(control_mode=train_config.control_mode),
+            _ut.UmiInputs(
+                model_type=model_config.model_type,
+                acting_slot=train_config.acting_slot,
+                context_is_static=train_config.context_is_static,
+            ),
+        ],
+        outputs=[_ut.UmiOutputs(action_dim=train_config.action_dim_actual)],
+    )
+
+    # Dataset-only: rename the dotted LeRobot feature keys to the slash-form the
+    # transforms use. Never runs at inference (the robot client sends slash keys).
+    acting = f"observation.images.cam_{train_config.hand}_wrist"
+    context_hand = "left" if train_config.hand == "right" else "right"
+    repack_transforms = _transforms.Group(
+        inputs=[
+            _transforms.RepackTransform({
+                "observation/image_wrist": acting,
+                "observation/image_context": f"observation.images.cam_{context_hand}_wrist",
+                # `action` alone carries the pose history, the gripper history
+                # AND the chunk targets; UmiSplitGathered decodes the layout.
+                # `observation.state` is deliberately not mapped — see
+                # umi_transforms.make_delta_timestamps.
+                "action": "action",
+                "action_is_pad": "action_is_pad",
+                "prompt": "prompt",
+            })
+        ]
+    )
+
+    return _config.DataConfig(
+        repo_id=train_config.repo_id,
+        asset_id=train_config.repo_id,
+        norm_stats={},   # see docstring: makes openpi's Normalize a no-op
+        repack_transforms=repack_transforms,
+        data_transforms=data_transforms,
+        model_transforms=_transforms.Group(inputs=model_inputs, outputs=model_outputs),
+        use_quantile_norm=True,
+        prompt_from_task=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# EgoRelationTrainConfig stack (loss_dim_weights is shared with the UMI stack)
 # --------------------------------------------------------------------------
 
 
