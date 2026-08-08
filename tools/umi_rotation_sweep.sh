@@ -66,6 +66,28 @@ FROM_SCRATCH_STEPS="${FROM_SCRATCH_STEPS:-10000}"   # matches the rotvec baselin
 RESUME_TO_STEPS="${RESUME_TO_STEPS:-20000}"
 RESUME_FROM_STEP="${RESUME_FROM_STEP:-9999}"
 
+# Which accelerators to use, e.g. DEVICES=0,1,2,3,4,5,14,15 to leave 6..13 for
+# someone else. Empty = all of them. PPU pretends to be CUDA (the SDK ships a
+# CUDA-compatible runtime), so CUDA_VISIBLE_DEVICES is genuinely the pinning
+# variable here -- see docs/ppu_venv_setup.md.
+DEVICES="${DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+[ -n "$DEVICES" ] && export CUDA_VISIBLE_DEVICES="$DEVICES"
+
+# GLOBAL batch, sharded across whatever devices are visible -- openpi only
+# requires batch_size % device_count == 0, so fewer devices means more samples
+# PER DEVICE, not a smaller batch.
+#
+# DO NOT scale this with the device count. 32 is what the two rotvec checkpoints
+# trained on for 9999 steps: changing it on resume would change the gradient
+# noise scale mid-run, and would also make the rot6d runs incomparable to them,
+# which is the entire point of the sweep. Halving the devices costs wall-clock
+# (~2x per step) and nothing else. At 8 devices this is 4 samples/device against
+# 96 GB each, which is not close to a constraint.
+#
+# Preflight checks it divides the device count AND matches what the resumed runs
+# actually used, read from their stamps.
+BATCH_SIZE="${BATCH_SIZE:-32}"
+
 # A stray norm-stats file lands here if `compute_norm_stats --umi` is ever run
 # WITHOUT --assets-base-dir: the default is <repo>/assets, inside the pull-only
 # checkout. Not used for anything -- but if it exists it is a free answer to
@@ -80,6 +102,7 @@ COMMON=(--video-backend pyav
         --weight-loader-params-path "$PI05_PARAMS"
         --assets-base-dir "$ASSETS"
         --checkpoint-base-dir "$RUNS"
+        --batch-size "$BATCH_SIZE"
         --resume)
 
 # Two flags, always together: action_dim_actual is VALIDATED against
@@ -110,9 +133,22 @@ cd "$REPO" || die "no checkout at $REPO (override with REPO=...)"
 NEVER 'uv run' or 'uv sync' on this box — both target ./.venv and resolve NVIDIA
 wheels from uv.lock, which is a silent CPU fallback."
 
-python -c "import jax,sys; n=jax.device_count(); print(f'  jax backend={jax.default_backend()} devices={n}');
-sys.exit(0 if jax.default_backend()=='gpu' and n>0 else 1)" \
-    || die "jax is not on the PPU backend — re-source envs/ppu-train.sh and read its verification block"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all>}   batch_size=$BATCH_SIZE (global)"
+python -c "
+import jax, sys
+n = jax.device_count()
+b = $BATCH_SIZE
+print(f'  jax backend={jax.default_backend()} devices={n}')
+if jax.default_backend() != 'gpu' or n == 0:
+    print('  NOT on the PPU backend', file=sys.stderr); sys.exit(1)
+if b % n:
+    print(f'  batch_size {b} is not divisible by {n} devices — openpi shards the '
+          f'GLOBAL batch and train.py rejects this outright. Pick a batch size '
+          f'divisible by {n}, but see the BATCH_SIZE comment first: changing it '
+          f'breaks comparability with the runs being resumed.', file=sys.stderr)
+    sys.exit(1)
+print(f'  -> {b // n} samples per device')
+" || die "device / batch-size check failed"
 
 # The from-scratch runs load pi05_base. Checked HERE rather than discovered 40
 # minutes in, after preflight has already passed.
@@ -177,15 +213,38 @@ fi
 # --------------------------------------------- preflight: the resume targets
 
 say "preflight: resume targets"
-python - "$RUNS" "$ASSETS" "$EXP_RV_HIST" "$EXP_RV_TOK" "$RESUME_FROM_STEP" <<'PY' \
+python - "$RUNS" "$ASSETS" "$EXP_RV_HIST" "$EXP_RV_TOK" "$RESUME_FROM_STEP" "$BATCH_SIZE" <<'PY' \
     2>&1 | tee "$LOGDIR/02_preflight.log"
 import json, pathlib, sys
 from ego2g1.train import config as _config, norm as _norm
 
-runs, assets, exp_hist, exp_tok, step = sys.argv[1:6]
-step = int(step)
+runs, assets, exp_hist, exp_tok, step, batch = sys.argv[1:7]
+step, batch = int(step), int(batch)
 bad = []
 rv = _config.UmiTrainConfig(assets_base_dir=assets, checkpoint_base_dir=runs)
+
+# Fields a RESUME must not change, because the checkpoint's first 9999 steps
+# were optimized under them and orbax restores the weights regardless. A
+# mismatch does not fail -- it silently continues a different experiment.
+#
+# num_train_steps is NOT here: changing it is the whole point (9999 -> 20k), and
+# it deliberately re-derives the LR cosine as a warm restart.
+RESUME_INVARIANTS = {
+    "batch_size": batch,          # gradient noise scale
+    "action_horizon": rv.action_horizon,
+    "history_lags": rv.history_lags,
+    "history_stride": rv.history_stride,
+    "history_len_probs": list(rv.history_len_probs),
+    "w_gripper": rv.w_gripper,
+    "model_space_clamp": rv.model_space_clamp,
+    "state_norm_clip": rv.state_norm_clip,
+    "hand": rv.hand,
+    "acting_slot": rv.acting_slot,
+    "peak_lr": rv.peak_lr,
+    "warmup_steps": rv.warmup_steps,
+    "ema_decay": rv.ema_decay,
+    "seed": rv.seed,
+}
 
 # The staged artifact the two resumes will load.
 s = _norm.load_umi(rv.stats_dir)
@@ -232,6 +291,27 @@ for exp, mode in ((exp_hist, "history"), (exp_tok, "gripper_token")):
             bad.append(f"{stamp}: rotation_repr={got_repr!r}, expected 'rotvec'")
         if got_mode != mode:
             bad.append(f"{stamp}: state_mode={got_mode!r}, expected {mode!r}")
+
+        # What this run will use vs what the checkpoint was trained under.
+        drift = []
+        for key, want in RESUME_INVARIANTS.items():
+            if key not in cfg:
+                continue     # predates the field; nothing to compare against
+            got = cfg[key]
+            if isinstance(want, list):
+                got = list(got) if isinstance(got, (list, tuple)) else got
+            if got != want:
+                drift.append(f"{key}: checkpoint={got!r} this run={want!r}")
+        if drift:
+            bad.append(
+                f"{exp} would resume under DIFFERENT hyperparameters than it was "
+                "trained with, which orbax will happily do — it restores the weights "
+                "and the new value simply takes effect from step "
+                f"{step} on:\n        " + "\n        ".join(drift))
+        else:
+            print(f"  OK  {exp}: resume hyperparameters match the checkpoint "
+                  f"(batch_size={cfg.get('batch_size', '?')}, "
+                  f"peak_lr={cfg.get('peak_lr', '?')})")
 
     # The run's own copy of the artifact it trained against. It records the
     # STAGING file, not the run's config -- train.main_umi copies, it does not
