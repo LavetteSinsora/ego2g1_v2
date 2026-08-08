@@ -32,8 +32,9 @@
 # load its native library on PPU). Training configs must therefore set
 # video_backend="pyav" — see ego2g1/train/config.py.
 #
-# Override per machine:
-#   EGO2G1_VENV=/path/to/.venv EGO2G1_DATA=/path/to/data source envs/ppu-train.sh
+# Override per machine (note the profile-specific venv variable — a shared
+# EGO2G1_VENV would leak between this profile and ppu-extract.sh):
+#   EGO2G1_TRAIN_VENV=/path/to/.venv EGO2G1_DATA=/path/to/data source envs/ppu-train.sh
 
 _EGO2G1_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 
@@ -44,7 +45,16 @@ if [ -z "${WS_HOME:-}" ] && [ -f "$EGO2G1_MACHINE_PROFILE" ]; then
     source "$EGO2G1_MACHINE_PROFILE"
 fi
 
-EGO2G1_VENV="${EGO2G1_VENV:-${WS_HOME:-$HOME}/venvs/train}"
+# Per-profile override name, NOT a shared EGO2G1_VENV: a shared name persists as
+# a shell variable after sourcing, so `source ppu-extract.sh` then
+# `source ppu-train.sh` would silently re-activate the EXTRACT venv.
+EGO2G1_VENV="${EGO2G1_TRAIN_VENV:-${WS_HOME:-$HOME}/venvs/train}"
+
+# Leave any venv that is already active, so PATH does not stack up across
+# switches and `deactivate` still means what it says.
+if [ -n "${VIRTUAL_ENV:-}" ] && command -v deactivate >/dev/null 2>&1; then
+    deactivate
+fi
 
 if [ -z "${WS_HOME:-}" ]; then
     echo "NOTE: no machine profile found at $EGO2G1_MACHINE_PROFILE — using" >&2
@@ -60,9 +70,13 @@ fi
 source "$EGO2G1_VENV/bin/activate"
 
 # repo root first (ego2g1), then the openpi submodule's src (openpi), so both
-# resolve to THIS checkout and shadow anything installed in the venv. PREPEND —
-# do not clobber what the machine profile may have set.
-export PYTHONPATH="$_EGO2G1_ROOT:$_EGO2G1_ROOT/third_party/openpi/src${PYTHONPATH:+:$PYTHONPATH}"
+# resolve to THIS checkout and shadow anything installed in the venv. Rebuilt
+# from a captured BASE rather than prepended to the live value, so re-sourcing
+# or switching to ppu-extract.sh cannot accumulate entries (or leave openpi's
+# src on the path in a venv whose whole point is a different transformers pin).
+: "${EGO2G1_PYTHONPATH_BASE=${PYTHONPATH:-}}"
+export EGO2G1_PYTHONPATH_BASE
+export PYTHONPATH="$_EGO2G1_ROOT:$_EGO2G1_ROOT/third_party/openpi/src${EGO2G1_PYTHONPATH_BASE:+:$EGO2G1_PYTHONPATH_BASE}"
 
 # Datasets and the recompute cache live on the shared filesystem, NOT in the
 # checkout — see ego2g1/core/paths.py. Without these, data_dir() points at an
@@ -72,7 +86,10 @@ export EGO2G1_WORK="${EGO2G1_WORK:-${WS_HOME:-$HOME}/cache/work}"
 
 # Guard the proven PPU core (jax pins, numpy window, torch) against accidental
 # resolution drift from any install made in a training shell.
-export UV_CONSTRAINT="${UV_CONSTRAINT:-$_EGO2G1_ROOT/envs/ppu-train-constraints.txt}"
+# Set unconditionally: with `:-` a constraints file left over from
+# ppu-extract.sh would survive into a training shell and cap numpy at <2, which
+# PPU jax 0.7.2 cannot satisfy.
+export UV_CONSTRAINT="$_EGO2G1_ROOT/envs/ppu-train-constraints.txt"
 export PIP_CONSTRAINT="$UV_CONSTRAINT"
 
 # XLA's first compile of train_step takes many minutes, and the PPU additionally

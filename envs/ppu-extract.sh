@@ -53,8 +53,9 @@
 # transformers 5.14.1; Sam3Model, ego2g1.deploy.perception.v2.orientation_v2 and
 # data_extraction.extract all import.
 #
-# Override per machine:
-#   EGO2G1_VENV=/path/to/.venv EGO2G1_DATA=/path/to/data source envs/ppu-extract.sh
+# Override per machine (note the profile-specific venv variable — a shared
+# EGO2G1_VENV would leak between this profile and ppu-train.sh):
+#   EGO2G1_EXTRACT_VENV=/path/to/.venv EGO2G1_DATA=/path/to/data source envs/ppu-extract.sh
 
 _EGO2G1_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 
@@ -65,7 +66,16 @@ if [ -z "${WS_HOME:-}" ] && [ -f "$EGO2G1_MACHINE_PROFILE" ]; then
     source "$EGO2G1_MACHINE_PROFILE"
 fi
 
-EGO2G1_VENV="${EGO2G1_VENV:-${WS_HOME:-$HOME}/venvs/extract}"
+# Per-profile override name, NOT a shared EGO2G1_VENV: a shared name persists as
+# a shell variable after sourcing, so `source ppu-train.sh` then
+# `source ppu-extract.sh` would silently re-activate the TRAIN venv.
+EGO2G1_VENV="${EGO2G1_EXTRACT_VENV:-${WS_HOME:-$HOME}/venvs/extract}"
+
+# Leave any venv that is already active, so PATH does not stack up across
+# switches and `deactivate` still means what it says.
+if [ -n "${VIRTUAL_ENV:-}" ] && command -v deactivate >/dev/null 2>&1; then
+    deactivate
+fi
 
 if [ ! -f "$EGO2G1_VENV/bin/activate" ]; then
     echo "ERROR: no venv at $EGO2G1_VENV (set EGO2G1_VENV=/path/to/.venv)" >&2
@@ -76,15 +86,21 @@ source "$EGO2G1_VENV/bin/activate"
 
 # Repo root ONLY. Unlike ppu-train.sh we do NOT put third_party/openpi/src on
 # the path: openpi's transformers==4.53.2 pin is the entire reason this venv is
-# separate, and nothing in the extraction path imports openpi.
-export PYTHONPATH="$_EGO2G1_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# separate, and nothing in the extraction path imports openpi. Rebuilt from a
+# captured BASE so switching back and forth with ppu-train.sh cannot leave
+# openpi's src behind here, nor accumulate duplicate entries.
+: "${EGO2G1_PYTHONPATH_BASE=${PYTHONPATH:-}}"
+export EGO2G1_PYTHONPATH_BASE
+export PYTHONPATH="$_EGO2G1_ROOT${EGO2G1_PYTHONPATH_BASE:+:$EGO2G1_PYTHONPATH_BASE}"
 
 # Episodes and the recompute cache live on the shared filesystem, not in the
 # checkout — see ego2g1/core/paths.py.
 export EGO2G1_DATA="${EGO2G1_DATA:-${WS_HOME:-$HOME}/data}"
 export EGO2G1_WORK="${EGO2G1_WORK:-${WS_HOME:-$HOME}/cache/work}"
 
-export UV_CONSTRAINT="${UV_CONSTRAINT:-$_EGO2G1_ROOT/envs/ppu-extract-constraints.txt}"
+# Set unconditionally: with `:-` the training constraints (numpy>=2) would
+# survive into an extraction shell, where numpy must stay <2.
+export UV_CONSTRAINT="$_EGO2G1_ROOT/envs/ppu-extract-constraints.txt"
 export PIP_CONSTRAINT="$UV_CONSTRAINT"
 
 cd "$_EGO2G1_ROOT"
