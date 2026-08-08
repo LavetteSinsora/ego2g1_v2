@@ -590,15 +590,17 @@ def test_loss_weights_hold_the_rotation_block_share_across_representations():
         def __init__(self, d):
             self.provenance = {"model_space_variance": [0.16] * d}
 
-    def shares(d, rot_dims, grip, **kw):
+    def shares(d, rot, grip, *, weight_rotation=True):
+        """(translation, rotation, gripper) share of the weighted MSE."""
+        kw = {"rot_dims": rot} if weight_rotation else {}
         w = _dc.loss_dim_weights(_S(d), d, grip, 3.0, **kw)
         var = 0.16
         tot = sum(wi * (1 + var) for wi in w)
         return tuple(sum(w[i] * (1 + var) for i in dims) / tot
-                     for dims in (range(3), rot_dims, grip))
+                     for dims in (range(3), rot, grip))
 
-    rv = shares(7, (3, 4, 5), (6,), rot_dims=(3, 4, 5))
-    r6 = shares(10, tuple(range(3, 9)), (9,), rot_dims=tuple(range(3, 9)))
+    rv = shares(7, (3, 4, 5), (6,))
+    r6 = shares(10, tuple(range(3, 9)), (9,))
     assert rv == pytest.approx((1 / 3, 1 / 3, 1 / 3))
     assert r6 == pytest.approx((1 / 3, 1 / 3, 1 / 3))
     # rotvec must be BITWISE unaffected by the new argument (3/3 == 1.0), or the
@@ -606,7 +608,8 @@ def test_loss_weights_hold_the_rotation_block_share_across_representations():
     assert (_dc.loss_dim_weights(_S(7), 7, (6,), 3.0)
             == _dc.loss_dim_weights(_S(7), 7, (6,), 3.0, rot_dims=(3, 4, 5)))
     # and this is what the stage prevents
-    assert shares(10, tuple(range(3, 9)), (9,)) == pytest.approx((0.25, 0.5, 0.25))
+    assert shares(10, tuple(range(3, 9)), (9,), weight_rotation=False) \
+        == pytest.approx((0.25, 0.5, 0.25))
 
 
 # ------------------------------------------------------- state_mode variants
