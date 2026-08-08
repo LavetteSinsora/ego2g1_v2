@@ -452,6 +452,11 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
             "n_lags": train_config.n_lags,
             "lag_ticks": list(train_config.lag_ticks),
             "history_dim": train_config.history_dim,
+            # P(history length = j) as TRAINED. Advertised so deploy can warn
+            # when --history-len asks for a length this checkpoint never saw —
+            # index 0 is 0.0 by default, i.e. a prompt with no `State history:`
+            # segment at all is out of distribution.
+            "history_len_probs": list(train_config.history_len_probs),
             "acting_slot": train_config.acting_slot,
             "gripper_dims": list(train_config.gripper_dims),
             # MEASURED poses, never commanded — the training data has no commanded

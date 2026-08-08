@@ -113,6 +113,55 @@ def test_lags_resolve_by_TIME_not_by_index():
                                    _vec9(x=0.01 * want_k), atol=1e-6)
 
 
+@pytest.mark.parametrize("cap,expect", [(0, 0), (1, 1), (3, 3), (6, 6), (None, 6)])
+def test_max_len_caps_the_reported_history(cap, expect):
+    """--history-len: ablate the channel on the real robot."""
+    buf = PoseHistoryBuffer(LAGS, FPS, max_len=cap)
+    t0 = 100.0
+    for k in range(40):
+        buf.push(t0 + k / FPS, _vec9(x=0.01 * k), gripper=4.0)
+    out = buf.sample()
+    assert out["history_len"] == expect
+
+
+def test_max_len_expresses_the_cap_as_PADDING():
+    """The cap must ride the same pad mask an episode start uses, so the
+    server truncates with ONE rule rather than a second one bolted on here."""
+    buf = PoseHistoryBuffer(LAGS, FPS, max_len=2)
+    for k in range(40):
+        buf.push(100.0 + k / FPS, _vec9(x=0.01 * k), gripper=4.0)
+    out = buf.sample()
+    is_pad = out["observation/pose_history_is_pad"]
+    assert not is_pad[:2].any() and is_pad[2:].all()
+    np.testing.assert_array_equal(out["observation/pose_history"][2:], 0.0)
+    np.testing.assert_array_equal(out["observation/gripper_history"][2:], 0.0)
+
+
+def test_max_len_never_invents_lags_it_does_not_have():
+    """A cap is an upper bound, not a floor: at a rollout start the buffer
+    still reports only what exists."""
+    buf = PoseHistoryBuffer(LAGS, FPS, max_len=6)
+    buf.push(100.0, _vec9(), gripper=4.0)
+    assert buf.sample()["history_len"] == 1
+
+
+@pytest.mark.parametrize("bad", [-1, 7])
+def test_max_len_out_of_range_is_refused(bad):
+    with pytest.raises(ValueError, match="max_len"):
+        PoseHistoryBuffer(LAGS, FPS, max_len=bad)
+
+
+def test_serving_advertises_the_trained_length_distribution():
+    """Deploy warns when --history-len asks for a length the checkpoint never
+    saw; it can only do that if the distribution is on the handshake."""
+    pytest.importorskip("openpi")
+    from ego2g1.train import config as _config
+
+    probs = _config.UmiTrainConfig().history_len_probs
+    assert probs[0] == 0.0, "a zero-length prompt is untrained by default"
+    assert sum(probs) == pytest.approx(1.0)
+
+
 def test_clear_drops_everything():
     buf = _filled(40)
     buf.clear()

@@ -50,7 +50,8 @@ class PoseHistoryBuffer:
     """
 
     def __init__(self, lag_ticks: tuple[int, ...], fps: float, *,
-                 tol_ticks: float = 0.75, capacity: int | None = None):
+                 tol_ticks: float = 0.75, capacity: int | None = None,
+                 max_len: int | None = None):
         if not lag_ticks or lag_ticks[0] != 0:
             raise ValueError(
                 f"lag_ticks must start at 0 (the anchor's own tick), got {lag_ticks}")
@@ -63,6 +64,17 @@ class PoseHistoryBuffer:
         # padding rather than as the neighbouring lag, loose enough to absorb
         # ordinary pacing jitter.
         self.tol_s = float(tol_ticks) * self.dt
+        # Hard cap on how many lags are ever reported, on top of whatever the
+        # buffer actually holds. `None` = report everything available. Used to
+        # ablate the history channel on the real robot the way the training
+        # val pools ablate it offline: the cap is expressed by MARKING the
+        # surplus lags as padding, so the server's own `UmiStateHistory`
+        # truncates exactly as it would at an episode start — one truncation
+        # rule, not a second one bolted on here.
+        if max_len is not None and not 0 <= max_len <= len(self.lag_ticks):
+            raise ValueError(
+                f"max_len={max_len} must be in [0, {len(self.lag_ticks)}]")
+        self.max_len = max_len
         # enough room for the whole window plus slack for jitter/backlog
         span = max(self.lag_ticks)
         self._buf: collections.deque = collections.deque(
@@ -141,6 +153,8 @@ class PoseHistoryBuffer:
         # of real lags. Anything after a hole is dropped -- see the module
         # docstring on why that is the conservative direction.
         length = int(np.argmax(is_pad)) if bool(is_pad.any()) else n
+        if self.max_len is not None:
+            length = min(length, self.max_len)
         is_pad[length:] = True
         poses[length:] = 0.0
         grips[length:] = 0.0

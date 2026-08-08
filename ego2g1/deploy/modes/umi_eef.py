@@ -236,6 +236,7 @@ class UmiPolicyAdapter:
                  collision_min_dist: float = 0.005,
                  lag_ticks: tuple[int, ...] | None = None,
                  acting: str | None = None, idle_hold: str = "latch",
+                 history_len: int | None = None,
                  history_tol_ticks: float = 0.75):
         self._client = client
         self.prompt = prompt
@@ -255,7 +256,20 @@ class UmiPolicyAdapter:
             collision_min_dist=collision_min_dist)
         self._kin = self._converter.kin
         self.history = _umi_history.PoseHistoryBuffer(
-            self.lag_ticks, self.fps, tol_ticks=history_tol_ticks)
+            self.lag_ticks, self.fps, tol_ticks=history_tol_ticks,
+            max_len=history_len)
+        if history_len is not None:
+            probs = cfg.get("history_len_probs")
+            share = (float(probs[history_len]) if probs is not None
+                     and history_len < len(probs) else None)
+            note = "" if share is None else f"; trained share p={share:g}"
+            logger.warning("state history CAPPED at %d of %d lags%s",
+                           history_len, len(self.lag_ticks), note)
+            if share == 0.0:
+                logger.warning(
+                    "  p=0 — this checkpoint NEVER saw a %d-lag prompt during "
+                    "training. Expect out-of-distribution behaviour; this is a "
+                    "diagnostic setting, not a deployment one.", history_len)
         self.last_history_len = 0
         # commanded / measured acting gripper, and the running worst gap
         self.last_grip_cmd = float("nan")
@@ -358,7 +372,8 @@ class UmiEEFMode(base.DeployMode):
             client, args.prompt, ik_iters=args.ik_iters,
             posture_cost=args.posture_cost,
             collision_min_dist=args.collision_min_dist,
-            idle_hold=getattr(args, "idle_hold", "latch"))
+            idle_hold=getattr(args, "idle_hold", "latch"),
+            history_len=getattr(args, "history_len", None))
 
     def idle_hand(self, adapter) -> str | None:
         conv = getattr(adapter, "converter", None)

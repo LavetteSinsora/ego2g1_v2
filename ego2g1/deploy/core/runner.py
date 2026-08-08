@@ -483,6 +483,17 @@ class Args:
     # DANGER: a limp arm falls under gravity. Support it before pressing Enter
     # at the prompt / before the arm goes limp.
     idle_limp: bool = False
+    # Cap how many state-history lags the policy is given, for ablating that
+    # channel on the real robot (the deploy-side twin of training's val_nohist
+    # / val_random pools). None = whatever the buffer has, which after the
+    # first half-second is the checkpoint's full grid.
+    #   6 (or None)  the deployed condition
+    #   1            lag 0 only: current gripper, NO motion history
+    #   0            no `State history:` segment at all
+    # The cap is applied by MARKING the surplus lags as padding, so the server
+    # truncates them with the same rule it uses at an episode start.
+    # A length this checkpoint never trained on is warned about, loudly.
+    history_len: int | None = None
     idle_limp_kd: float = 2.0          # damping left on the limp arm
     # Command every gripper fully open once the arm has reached its start pose.
     # The vendor's connect() ramps the ARM but says nothing about grippers, so
