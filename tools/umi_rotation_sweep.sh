@@ -196,21 +196,33 @@ for exp, mode in ((exp_hist, "history"), (exp_tok, "gripper_token")):
         if got_mode != mode:
             bad.append(f"{stamp} says state_mode={got_mode!r}, expected {mode!r}")
 
-    # Positive confirmation, independent of the stamp: the run's OWN stats copy
-    # records the lag grid it trained with. A history run has n_lags rows, a
-    # gripper_token run has 1. This is the check that would catch a mislabelled
-    # or hand-edited stamp, and it is also what proves the file is there to
-    # restore from if the staging copy has gone missing.
+    # The run's OWN stats copy, which is the artifact it actually trained
+    # against and therefore the thing to restore from.
+    #
+    # It records the STAGING file, not the run's config: `train.main_umi` copies
+    # the artifact it loaded, it does not recompute one per mode. So a
+    # gripper_token run legitimately carries a 6-lag grid — that is the "one
+    # artifact serves both modes" design working, not a mislabelled run, and
+    # asserting otherwise (as this did) fails on a perfectly healthy checkpoint.
+    #
+    # Only the HISTORY run constrains the grid, because it is the only one that
+    # reads it: `NormalizeHistory` no-ops in gripper_token mode, where nothing is
+    # injected. A short grid there would be silently fine; a short grid in the
+    # history run is a first-batch crash.
     own = d / "assets_ego2g1"
     if (own / "umi_stats.npz").exists():
         o = _norm.load_umi(own)
-        want = rv.n_lags if mode == "history" else 1
-        if o.history_mean.shape[0] != want:
-            bad.append(f"{own}/umi_stats.npz has a {o.history_mean.shape[0]}-lag grid "
-                       f"but {exp} is supposed to be {mode} ({want} lags)")
+        n = o.history_mean.shape[0]
+        if mode == "history" and n != rv.n_lags:
+            bad.append(f"{own}/umi_stats.npz has a {n}-lag grid but {exp} injects "
+                       f"{rv.n_lags} history tokens — NormalizeHistory would raise on "
+                       "the first batch")
+        elif o.rotation_repr != "rotvec":
+            bad.append(f"{own}/umi_stats.npz is {o.rotation_repr!r}, expected 'rotvec'")
         else:
-            print(f"  OK  {exp} trained with a {o.history_mean.shape[0]}-lag "
-                  f"{o.rotation_repr} grid (its own copy, at {own})")
+            note = "" if mode == "history" else " (unused in this mode)"
+            print(f"  OK  {exp} trained with a {n}-lag {o.rotation_repr} grid{note}, "
+                  f"at {own}")
     else:
         print(f"  NOTE {own}/umi_stats.npz is absent — nothing to restore the "
               "staging artifact from if it is missing too")

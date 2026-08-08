@@ -91,6 +91,12 @@ def main(argv=None) -> int:
     p.add_argument("--rotation-repr", default="rotvec", choices=("rotvec", "rot6d"))
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing staging file")
+    p.add_argument("--compare-with", type=pathlib.Path, default=None,
+                   help="a directory holding another umi_stats.npz (e.g. a fresh "
+                        "compute_norm_stats output) to diff against the source. "
+                        "REPORTS ONLY, never blocks — it answers 'would recomputing "
+                        "have given the same grids?' with numbers instead of an "
+                        "argument")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
 
@@ -142,6 +148,35 @@ def main(argv=None) -> int:
             print(f"agrees: {o_path}  (action grid, gripper dims and quantiles "
                   f"identical; its {o.history_mean.shape[0]}-lag history grid is "
                   "unused in gripper_token mode)")
+
+    # Reported, never enforced: a difference here does not make the restore
+    # wrong (the source is what the run trained on, by definition), it tells you
+    # whether recomputing WOULD have been safe. Equal grids mean the pipeline is
+    # reproducible and the caution cost nothing; unequal grids mean recomputing
+    # would have silently changed the target distribution mid-run.
+    if a.compare_with is not None:
+        from ego2g1.train import norm as _norm
+
+        other = _norm.load_umi(a.compare_with)
+        print(f"\ncompare-with: {a.compare_with}/{_norm.UMI_FILENAME}")
+        same = True
+        for name, x, y in (("action_q01", other.action_q01, src.action_q01),
+                           ("action_q99", other.action_q99, src.action_q99),
+                           ("history_mean", other.history_mean, src.history_mean),
+                           ("history_std", other.history_std, src.history_std)):
+            if x.shape != y.shape:
+                print(f"  {name:13s} SHAPE {x.shape} vs {y.shape}")
+                same = False
+            elif np.array_equal(x, y):
+                print(f"  {name:13s} identical")
+            else:
+                d = np.abs(x - y)
+                print(f"  {name:13s} DIFFERS  max |delta| {d.max():.3e}  "
+                      f"max rel {np.abs(d / np.maximum(np.abs(y), 1e-12)).max():.3e}")
+                same = False
+        print("  -> a recompute would have been bit-identical" if same else
+              "  -> a recompute would have CHANGED the normalization: restoring was "
+              "necessary, not just cautious")
 
     if dest.exists() and not a.force:
         problems.append(
