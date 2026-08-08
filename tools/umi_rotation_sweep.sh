@@ -49,8 +49,8 @@ LOGDIR="${LOGDIR:-$RUNS/logs/rotation_sweep_$(date +%Y%m%d_%H%M%S)}"
 # preflight fails loudly (and lists what IS there) rather than starting a fresh
 # run under a name that does not exist, which is what `--resume` would otherwise
 # quietly do.
-EXP_RV_HIST="${EXP_RV_HIST:-umi_hist}"
-EXP_RV_TOK="${EXP_RV_TOK:-umi_nohist}"
+EXP_RV_HIST="${EXP_RV_HIST:-umi}"
+EXP_RV_TOK="${EXP_RV_TOK:-umi_no_state_history}"
 EXP_R6_HIST="${EXP_R6_HIST:-umi_6DRot_with_history}"
 EXP_R6_TOK="${EXP_R6_TOK:-umi_6DRot_no_history}"
 
