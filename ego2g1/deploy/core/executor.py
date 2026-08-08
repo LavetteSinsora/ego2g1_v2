@@ -67,13 +67,18 @@ class UnitreeExecutor:
     #            crush every command to 1.0 and the gripper would never open —
     #            which is exactly why the limits live in this table instead of
     #            being hard-coded in send().
+    # `open` is the fully-OPEN command for one end-effector motor. It is what
+    # `open_grippers()` sends at bring-up and what `hold()` falls back to before
+    # anything has been commanded — a zero would be correct for Brainco but is
+    # OUTSIDE a Dex1's travel and would drive it into a hard stop.
     _EE_LAYOUTS = {
-        "unitree_g1_brainco": {"per_hand": 6, "limits": (0.0, 1.0)},
+        "unitree_g1_brainco": {"per_hand": 6, "limits": (0.0, 1.0), "open": 0.0},
         # Range measured on red_block_on_yellow_block_umi: 1.20 (fully closed,
-        # a hard floor in the data) .. 5.40 (fully open). Widened slightly so a
-        # legitimate command at either extreme is not silently trimmed; this is
-        # a corruption guard, not a calibration.
-        "unitree_g1_dex1": {"per_hand": 1, "limits": (0.0, 6.0)},
+        # a hard floor in the data) .. 5.40 (fully open, also a hard ceiling —
+        # it is the max over all 41207 frames). `limits` is widened slightly so
+        # a legitimate command at either extreme is not silently trimmed; that
+        # is a corruption guard, not a calibration.
+        "unitree_g1_dex1": {"per_hand": 1, "limits": (0.0, 6.0), "open": 5.40},
     }
 
     def __init__(self, *, fps: int = 30, network_interface: str | None = None,
@@ -121,6 +126,7 @@ class UnitreeExecutor:
         self._lock = threading.Lock()
         self._last_q: np.ndarray | None = None
         self._last_ee: dict | None = None   # filled by arm_q(), read by ee_q()
+        self._limp: dict[str, dict] = {}    # hand -> {motor id: (kp, kd)} saved
         self._last_q_change_t = time.monotonic()
         self._last_sent: tuple[float, np.ndarray] | None = None  # telemetry only
 
@@ -257,12 +263,123 @@ class UnitreeExecutor:
             out[base:base + per_hand] = block[:per_hand]
         return out
 
-    def hold(self) -> None:
-        """Re-send the measured pose (a safe no-op waypoint)."""
-        q = self.arm_q()
+    def _ee_row(self) -> np.ndarray:
+        """A (26,) row whose HAND blocks are safe to send right now.
+
+        The last row actually sent if there is one, else the fully-open
+        command. NOT zeros: zero is Brainco's "open" but is outside a Dex1's
+        travel, so a zeroed hold would drive that gripper into a hard stop —
+        and `hold()` is called at bring-up, exactly when nothing has been
+        commanded yet.
+        """
         row = np.zeros(_actions.ROBOT_DIM)
-        row[_actions.ARM] = q
+        if self._last_sent is not None:
+            return self._last_sent[1].copy()
+        per_hand = self._ee["per_hand"]
+        for h in layout.HANDS:
+            row[_actions.HAND[h]][:per_hand] = self._ee["open"]
+        return row
+
+    def hold(self) -> None:
+        """Re-send the measured arm pose, holding the end-effectors where they
+        already are (a safe no-op waypoint)."""
+        row = self._ee_row()
+        row[_actions.ARM] = self.arm_q()
         self.send(row)
+
+    def open_grippers(self) -> None:
+        """Command every end-effector fully OPEN, arm unchanged.
+
+        Bring-up hygiene: the vendor's `connect()` ramps the ARM to its init
+        pose but says nothing about the grippers, so whatever they were left
+        holding persists into the rollout. A policy that expects to approach an
+        object with an open gripper starts out of distribution otherwise.
+        """
+        row = np.zeros(_actions.ROBOT_DIM)
+        per_hand = self._ee["per_hand"]
+        for h in layout.HANDS:
+            row[_actions.HAND[h]][:per_hand] = self._ee["open"]
+        row[_actions.ARM] = self.arm_q()
+        logger.info("opening grippers to %.3f (%s)", self._ee["open"], self.robot_type)
+        self.send(row)
+
+    # --- per-arm compliance ---------------------------------------------------
+
+    def _arm_controller(self):
+        arms = getattr(self._robot, "arm", {})
+        if len(arms) != 1:
+            raise RuntimeError(
+                f"expected exactly one arm controller, got {sorted(arms)} — the "
+                "per-arm limp path writes into that controller's shared LowCmd")
+        return next(iter(arms.values()))
+
+    def _arm_motor_ids(self, hand: str):
+        """The vendor motor ids for one arm, in this repo's joint order.
+
+        `G1_29_JointArmIndex` lists left (15..21) then right (22..28), which is
+        exactly `layout.ARM_SLICE`'s ordering — the same correspondence
+        `_update_g1_arm` relies on when it zips the enum against a 14-vector.
+        """
+        from unitree_deploy.robot_devices.robot_devices_index import G1_29_JointArmIndex
+
+        return list(G1_29_JointArmIndex)[layout.ARM_SLICE[hand]]
+
+    def limp_arm(self, hand: str, *, kd: float = 2.0) -> None:
+        """Make ONE arm back-drivable: zero its position gain, keep damping.
+
+        Safe to do while the publish thread runs, because that thread never
+        rewrites gains — `_update_g1_arm` writes only q/dq/tau per joint and
+        re-publishes the same LowCmd, so a one-time kp/kd edit persists. The
+        other arm is untouched and stays fully controlled.
+
+        DANGER: a limp arm falls under gravity. Support it before calling this.
+
+        The previous gains are saved so `unlimp_arm` restores exactly what
+        `connect()` configured, rather than recomputing them from config and
+        hoping the two agree.
+        """
+        ctrl = self._arm_controller()
+        saved = {}
+        for i in self._arm_motor_ids(hand):
+            saved[int(i)] = (float(ctrl.msg.motor_cmd[i].kp),
+                             float(ctrl.msg.motor_cmd[i].kd))
+            ctrl.msg.motor_cmd[i].kp = 0.0
+            ctrl.msg.motor_cmd[i].kd = float(kd)
+        self._limp[hand] = saved
+        logger.warning("%s arm is now LIMP (kp=0, kd=%.2f) — it will fall if "
+                       "unsupported. It re-stiffens on Start.", hand, kd)
+
+    def unlimp_arm(self, hand: str, *, settle_s: float = 0.8) -> None:
+        """Restore an arm's gains, WITHOUT snapping it back.
+
+        The command target is still wherever it was when the arm went limp (the
+        init pose), so restoring kp directly would yank the arm from where you
+        physically left it back to that stale target. Instead: stream the
+        MEASURED pose as waypoints until the interpolator has converged on it,
+        and only then re-stiffen. Streaming rather than sending once is what
+        makes this robust to the interpolator's own max_pos_speed clamp on a
+        long reposition.
+        """
+        saved = self._limp.pop(hand, None)
+        if not saved:
+            return
+        deadline = time.monotonic() + settle_s
+        while time.monotonic() < deadline:
+            self.hold()
+            time.sleep(self.control_dt)
+        ctrl = self._arm_controller()
+        for i, (kp, kd) in saved.items():
+            ctrl.msg.motor_cmd[i].kp = kp
+            ctrl.msg.motor_cmd[i].kd = kd
+        logger.info("%s arm gains restored; holding where you left it", hand)
+
+    def unlimp_all(self, *, settle_s: float = 0.8) -> None:
+        for hand in list(self._limp):
+            self.unlimp_arm(hand, settle_s=settle_s)
+
+    @property
+    def limp_hands(self) -> tuple:
+        return tuple(self._limp)
 
     # --- telemetry (dashboard pull side; reads only, existing lock only) -----
 
@@ -341,6 +458,7 @@ class MockExecutor:
         self._q = np.zeros(_actions.ARM_DOF) if initial_q is None \
             else np.asarray(initial_q, dtype=np.float64).copy()
         self.sent: list[tuple[float, np.ndarray]] = []   # (t_target, row26)
+        self._limp: set[str] = set()
         self.damped = False
         self._connected = False
         self._estopped = False
@@ -379,9 +497,29 @@ class MockExecutor:
         self._q = row[_actions.ARM].copy()     # perfect, instant tracking
 
     def hold(self) -> None:
+        row = self.sent[-1][1].copy() if self.sent else np.zeros(_actions.ROBOT_DIM)
+        row[_actions.ARM] = self._q
+        self.send(row)
+
+    # --- surface parity with UnitreeExecutor (dry runs exercise these paths) ---
+
+    def open_grippers(self) -> None:
         row = np.zeros(_actions.ROBOT_DIM)
         row[_actions.ARM] = self._q
         self.send(row)
+
+    def limp_arm(self, hand: str, *, kd: float = 2.0) -> None:
+        self._limp.add(hand)
+
+    def unlimp_arm(self, hand: str, *, settle_s: float = 0.8) -> None:
+        self._limp.discard(hand)
+
+    def unlimp_all(self, *, settle_s: float = 0.8) -> None:
+        self._limp.clear()
+
+    @property
+    def limp_hands(self) -> tuple:
+        return tuple(sorted(self._limp))
 
     def telemetry(self) -> dict:
         last = self.sent[-1] if self.sent else None

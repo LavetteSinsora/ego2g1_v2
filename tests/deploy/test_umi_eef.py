@@ -318,6 +318,149 @@ def test_brainco_wire_row_is_the_identity():
     np.testing.assert_allclose(brainco._wire_row(row), row)
 
 
+def _probe_executor(robot_type="unitree_g1_dex1"):
+    """A UnitreeExecutor with only the fields the pure-logic methods touch."""
+    from ego2g1.deploy.core.executor import UnitreeExecutor
+
+    ex = UnitreeExecutor.__new__(UnitreeExecutor)
+    ex._ee = UnitreeExecutor._EE_LAYOUTS[robot_type]
+    ex.robot_type = robot_type
+    ex._last_sent = None
+    ex._limp = {}
+    return ex
+
+
+def test_hold_falls_back_to_OPEN_not_zero_before_anything_is_sent():
+    """`hold()` runs at bring-up, before any command exists. Zero is Brainco's
+    open but is OUTSIDE a Dex1's travel — a zeroed hold would drive that
+    gripper into a hard stop."""
+    dex1 = _probe_executor()
+    row = dex1._ee_row()
+    assert row[_actions.HAND["right"]][0] == pytest.approx(5.40)
+    assert row[_actions.HAND["left"]][0] == pytest.approx(5.40)
+
+    brainco = _probe_executor("unitree_g1_brainco")
+    np.testing.assert_allclose(brainco._ee_row()[_actions.ARM_DOF:], 0.0)
+
+
+def test_hold_preserves_whatever_was_last_commanded():
+    dex1 = _probe_executor()
+    last = np.zeros(_actions.ROBOT_DIM)
+    last[_actions.HAND["right"]][0] = 1.20          # mid-grasp
+    dex1._last_sent = (0.0, last)
+    assert dex1._ee_row()[_actions.HAND["right"]][0] == pytest.approx(1.20)
+
+
+def test_arm_motor_ids_split_left_and_right_correctly():
+    """`G1_29_JointArmIndex` is left(15..21) then right(22..28) — the same
+    ordering `_update_g1_arm` zips against a 14-vector. Getting this wrong
+    would limp the arm the policy is driving."""
+    pytest.importorskip("unitree_deploy")
+    ex = _probe_executor()
+    assert [int(i) for i in ex._arm_motor_ids("left")] == list(range(15, 22))
+    assert [int(i) for i in ex._arm_motor_ids("right")] == list(range(22, 29))
+
+
+def test_limp_zeroes_only_that_arms_gains_and_unlimp_restores_them_exactly():
+    """The other arm must stay fully controlled, and restore must put back what
+    connect() configured rather than a recomputed guess."""
+    pytest.importorskip("unitree_deploy")
+
+    class _Cmd:
+        def __init__(self, kp, kd): self.kp, self.kd = kp, kd
+
+    class _Ctrl:
+        def __init__(self): self.msg = type("M", (), {"motor_cmd": {}})()
+
+    ctrl = _Ctrl()
+    for i in range(15, 29):
+        ctrl.msg.motor_cmd[i] = _Cmd(80.0 + i, 3.0)
+    before = {i: (ctrl.msg.motor_cmd[i].kp, ctrl.msg.motor_cmd[i].kd) for i in range(15, 29)}
+
+    ex = _probe_executor()
+    ex._arm_controller = lambda: ctrl
+    ex.limp_arm("left", kd=2.0)
+
+    for i in range(15, 22):                      # left: limp
+        assert ctrl.msg.motor_cmd[i].kp == 0.0
+        assert ctrl.msg.motor_cmd[i].kd == 2.0
+    for i in range(22, 29):                      # right: untouched
+        assert (ctrl.msg.motor_cmd[i].kp, ctrl.msg.motor_cmd[i].kd) == before[i]
+    assert ex.limp_hands == ("left",)
+
+    # unlimp streams the measured pose before re-stiffening; stub that out
+    ex.hold = lambda: None
+    ex.control_dt = 0.0
+    ex.unlimp_arm("left", settle_s=0.0)
+    for i in range(15, 29):
+        assert (ctrl.msg.motor_cmd[i].kp, ctrl.msg.motor_cmd[i].kd) == before[i]
+    assert ex.limp_hands == ()
+
+
+def test_unlimp_is_a_noop_when_nothing_is_limp():
+    ex = _probe_executor()
+    ex._arm_controller = lambda: (_ for _ in ()).throw(AssertionError("must not touch gains"))
+    ex.unlimp_all(settle_s=0.0)          # no exception => never reached the controller
+
+
+def test_open_grippers_uses_the_layout_open_value():
+    from ego2g1.deploy.core.executor import MockExecutor
+
+    ex = MockExecutor(fps=FPS)
+    ex.connect()
+    ex.open_grippers()
+    assert len(ex.sent) == 1
+    for rt, want in (("unitree_g1_dex1", 5.40), ("unitree_g1_brainco", 0.0)):
+        probe = _probe_executor(rt)
+        assert probe._ee_row()[_actions.HAND["right"]][0] == pytest.approx(want)
+
+
+def test_idle_limp_needs_a_mode_that_has_an_idle_arm():
+    """Refusing to guess which arm is safe to let go of."""
+    from ego2g1.deploy import modes
+
+    class _Conv:
+        idle = "left"
+
+    class _Adapter:
+        converter = _Conv()
+
+    assert modes.get("umi_eef").idle_hand(_Adapter()) == "left"
+    # every other family drives both arms -> None -> the runner fails loud
+    for name in ("joint", "relative_eef", "relation_eef"):
+        assert modes.get(name).idle_hand(object()) is None
+
+
+def test_rearm_restores_limp_gains_before_anything_else(monkeypatch):
+    """Order matters: the arm must be stiff and holding where it was left
+    BEFORE the clamp re-grounds and the first chunk is converted."""
+    from ego2g1.deploy.core.executor import MockExecutor
+    from ego2g1.deploy.core.runner import DeployRunner
+
+    calls = []
+    ex = MockExecutor(fps=FPS)
+    ex.connect()
+    ex.limp_arm("left")
+    real_unlimp = ex.unlimp_all
+    ex.unlimp_all = lambda **kw: (calls.append("unlimp"), real_unlimp(**kw))[1]
+    real_arm_q = ex.arm_q
+    ex.arm_q = lambda: (calls.append("arm_q"), real_arm_q())[1]
+
+    class _Strategy:
+        def clear(self): calls.append("strategy.clear")
+
+    class _Adapter:
+        mode = "joint"
+        def reset(self): calls.append("adapter.reset")
+
+    r = DeployRunner(adapter=_Adapter(), strategy=_Strategy(), executor=ex,
+                     fps=FPS, wait=lambda *a, **k: None)
+    r._rearm("test")
+    assert "unlimp" in calls
+    assert calls.index("unlimp") < calls.index("adapter.reset")
+    assert ex.limp_hands == ()
+
+
 def test_hold_in_place_command_round_trips_through_the_wire_row():
     """The property `check dex1` asserts on hardware, pinned here on synthetic
     numbers: a canonical row built to HOLD the measured state must produce a

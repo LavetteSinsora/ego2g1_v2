@@ -230,6 +230,14 @@ class DeployRunner:
         filters, and the clamp's last knot did not."""
         if hasattr(self.strategy, "clear"):
             self.strategy.clear()
+        # FIRST: re-stiffen any arm left limp for hand positioning, before
+        # anything else reads or commands the arm. unlimp_arm streams the
+        # MEASURED pose until the interpolator has converged on it, so the arm
+        # holds where the operator left it instead of snapping back to the
+        # stale init-pose target. A no-op when nothing is limp.
+        unlimp = getattr(self.executor, "unlimp_all", None)
+        if callable(unlimp):
+            unlimp()
         reset = getattr(self.adapter, "reset", None)
         if callable(reset):
             reset()
@@ -468,6 +476,19 @@ class Args:
     #            stays. The positioning workflow; the view is only as stable as
     #            the room is.
     idle_hold: str = "latch"
+    # Make the arm the policy does NOT drive back-drivable at bring-up, so you
+    # can position it by hand, and re-stiffen it on Start (where --idle-hold
+    # latch then freezes it exactly where you left it).
+    #
+    # DANGER: a limp arm falls under gravity. Support it before pressing Enter
+    # at the prompt / before the arm goes limp.
+    idle_limp: bool = False
+    idle_limp_kd: float = 2.0          # damping left on the limp arm
+    # Command every gripper fully open once the arm has reached its start pose.
+    # The vendor's connect() ramps the ARM but says nothing about grippers, so
+    # otherwise they keep whatever they were last holding — and a policy that
+    # expects to approach with an open gripper starts out of distribution.
+    open_grippers: bool = True
     # Wrist cameras. Left EMPTY for a normal run: both come off the robot's own
     # image_server (--camera-host), the same client the head camera uses —
     # ImageClient publishes cam_left_wrist/cam_right_wrist alongside the head
@@ -580,6 +601,27 @@ def main(args: Args) -> None:
         # NOTE unitree_deploy's connect() runs its own soft drive_to_waypoint
         # ramp to the configured init pose — expect the arm to move here.
         executor.connect()
+
+        # Bring-up, in this order: the arm has just ramped to its start pose,
+        # so open the grippers, THEN let the idle arm go so it can be
+        # positioned. Limping last means the operator is not holding a limp arm
+        # while anything else is still moving.
+        if args.open_grippers and hasattr(executor, "open_grippers"):
+            executor.open_grippers()
+        if args.idle_limp:
+            idle = mode.idle_hand(adapter)
+            if idle is None:
+                raise ValueError(
+                    f"--idle-limp needs a mode with an arm it does not drive; "
+                    f"{mode.name} drives them all. Refusing to guess which arm "
+                    "is safe to let go of.")
+            logger.warning("=" * 70)
+            logger.warning("SUPPORT THE %s ARM NOW — it is about to go limp and "
+                           "will fall if unheld.", idle.upper())
+            logger.warning("Position it, then press Start; it re-stiffens and "
+                           "holds exactly where you leave it.")
+            logger.warning("=" * 70)
+            executor.limp_arm(idle, kd=args.idle_limp_kd)
 
         if args.skip_latency_check:
             logger.warning("latency self-check SKIPPED — never do this on hardware")

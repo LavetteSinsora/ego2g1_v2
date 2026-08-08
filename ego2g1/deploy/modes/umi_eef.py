@@ -360,6 +360,10 @@ class UmiEEFMode(base.DeployMode):
             collision_min_dist=args.collision_min_dist,
             idle_hold=getattr(args, "idle_hold", "latch"))
 
+    def idle_hand(self, adapter) -> str | None:
+        conv = getattr(adapter, "converter", None)
+        return None if conv is None else conv.idle
+
     def build_camera(self, args):
         """Both wrist cameras. By default they come off the robot's own
         image_server — the same host and the same client the head camera uses,

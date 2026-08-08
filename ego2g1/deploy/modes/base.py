@@ -43,6 +43,15 @@ class DeployMode:
         duck-typed stub carrying the fields this mode reads)."""
         raise NotImplementedError
 
+    def idle_hand(self, adapter) -> str | None:
+        """The arm this family does NOT drive, or None if it drives them all.
+
+        Only `--idle-limp` reads it: that arm can be made back-drivable at
+        bring-up so the operator can position it, and re-stiffened on Start.
+        Returning None makes `--idle-limp` fail loud rather than guess which
+        arm is safe to let go of."""
+        return None
+
     def build_camera(self, args):
         """The camera object this family consumes, or None to let the runner
         build its default single head camera. `umi_eef` overrides it: that
