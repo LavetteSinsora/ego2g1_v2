@@ -263,6 +263,50 @@ class UnitreeExecutor:
             out[base:base + per_hand] = block[:per_hand]
         return out
 
+    def wait_for_start_pose(self, *, timeout: float = 10.0, tol: float = 0.05,
+                            settle_s: float = 0.3) -> bool:
+        """Block until the arms have ARRIVED at the vendor's init pose.
+
+        `connect()` returns while the ramp is still running, which is a trap for
+        anything that reads or commands the arm straight afterwards. The vendor
+        ramps inside its publish thread:
+
+            _ctrl_motor_state:  sleep(2)  ->  go_start()  # a blocking 2 s ramp
+
+        while `UnitreeRobot.connect()` sleeps its own 2 s and returns — i.e.
+        right as the ramp BEGINS. Two things that used to go wrong here:
+        `open_grippers()` would capture the PRE-ramp pose and schedule it as a
+        waypoint, which the outer loop then executed once the ramp finished,
+        driving both arms back where they started; and `limp_arm()` would cut
+        the gains mid-ramp so that arm never arrived at all.
+
+        Polls the MEASURED joints against the controller's own `init_pose`
+        rather than sleeping a magic number, so it reports what actually
+        happened. Returns False (with a warning) on timeout rather than
+        raising — a rig whose init pose is unreachable should still be
+        drivable, just not silently.
+        """
+        ctrl = self._arm_controller()
+        init = np.asarray(getattr(ctrl, "init_pose", np.zeros(_actions.ARM_DOF)),
+                          dtype=np.float64).reshape(-1)
+        if init.shape != (_actions.ARM_DOF,):
+            logger.warning("init_pose is %s, expected (%d,) — not waiting",
+                           init.shape, _actions.ARM_DOF)
+            return False
+        deadline = time.monotonic() + timeout
+        worst = float("inf")
+        while time.monotonic() < deadline:
+            worst = float(np.abs(self.arm_q() - init).max())
+            if worst <= tol:
+                time.sleep(settle_s)      # let the last of the ramp bleed off
+                logger.info("start pose reached (worst joint error %.4f rad)", worst)
+                return True
+            time.sleep(0.05)
+        logger.warning("arms did NOT reach the start pose within %.1fs "
+                       "(worst joint error %.4f rad > %.3f) — continuing anyway",
+                       timeout, worst, tol)
+        return False
+
     def _ee_row(self) -> np.ndarray:
         """A (26,) row whose HAND blocks are safe to send right now.
 
@@ -502,6 +546,9 @@ class MockExecutor:
         self.send(row)
 
     # --- surface parity with UnitreeExecutor (dry runs exercise these paths) ---
+
+    def wait_for_start_pose(self, **kwargs) -> bool:
+        return True                      # a mock is always already there
 
     def open_grippers(self) -> None:
         row = np.zeros(_actions.ROBOT_DIM)

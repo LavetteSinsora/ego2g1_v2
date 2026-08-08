@@ -397,6 +397,44 @@ def test_limp_zeroes_only_that_arms_gains_and_unlimp_restores_them_exactly():
     assert ex.limp_hands == ()
 
 
+def test_wait_for_start_pose_polls_the_measured_arm_against_init_pose():
+    """connect() returns WHILE the vendor's ramp is still running. Everything
+    at bring-up must wait for arrival, or open_grippers() schedules the
+    pre-ramp pose (undoing the ramp) and limp_arm() cuts gains mid-travel."""
+    ex = _probe_executor()
+    init = np.zeros(_actions.ARM_DOF)
+
+    class _Ctrl:
+        init_pose = init
+
+    ex._arm_controller = lambda: _Ctrl()
+    # arm is still travelling for the first few polls, then arrives
+    seq = [0.9, 0.4, 0.01]
+    polls = []
+
+    def _arm_q():
+        v = seq.pop(0) if len(seq) > 1 else seq[0]
+        polls.append(v)
+        return np.full(_actions.ARM_DOF, v)
+
+    ex.arm_q = _arm_q
+    assert ex.wait_for_start_pose(timeout=5.0, tol=0.05, settle_s=0.0) is True
+    assert polls == [0.9, 0.4, 0.01], "must keep polling until the arm ARRIVES"
+
+
+def test_wait_for_start_pose_warns_and_continues_on_timeout():
+    """An unreachable init pose must not brick the run — but must not pass
+    silently either."""
+    ex = _probe_executor()
+
+    class _Ctrl:
+        init_pose = np.zeros(_actions.ARM_DOF)
+
+    ex._arm_controller = lambda: _Ctrl()
+    ex.arm_q = lambda: np.full(_actions.ARM_DOF, 1.5)      # never arrives
+    assert ex.wait_for_start_pose(timeout=0.15, tol=0.05, settle_s=0.0) is False
+
+
 def test_unlimp_is_a_noop_when_nothing_is_limp():
     ex = _probe_executor()
     ex._arm_controller = lambda: (_ for _ in ()).throw(AssertionError("must not touch gains"))

@@ -602,10 +602,17 @@ def main(args: Args) -> None:
         # ramp to the configured init pose — expect the arm to move here.
         executor.connect()
 
-        # Bring-up, in this order: the arm has just ramped to its start pose,
-        # so open the grippers, THEN let the idle arm go so it can be
-        # positioned. Limping last means the operator is not holding a limp arm
-        # while anything else is still moving.
+        # Bring-up order is load-bearing. connect() RETURNS WHILE THE RAMP IS
+        # STILL RUNNING (the vendor ramps inside its publish thread — see
+        # UnitreeExecutor.wait_for_start_pose), so everything below must wait
+        # for the arms to actually arrive first: otherwise open_grippers()
+        # schedules the PRE-ramp pose as a waypoint (undoing the ramp for both
+        # arms once it completes) and limp_arm() cuts the gains mid-travel so
+        # that arm never arrives. Then: grippers open, and only last does the
+        # idle arm go slack — so the operator is never holding a limp arm while
+        # the other one is still moving.
+        if hasattr(executor, "wait_for_start_pose"):
+            executor.wait_for_start_pose()
         if args.open_grippers and hasattr(executor, "open_grippers"):
             executor.open_grippers()
         if args.idle_limp:
