@@ -265,12 +265,23 @@ def main_umi(config: _config.UmiTrainConfig):
         normalized = np.clip(normalized, -config.model_space_clamp, config.model_space_clamp)
     model_space_variance = normalized.reshape(-1, d_real).var(axis=0)
 
+    # Scalar quantiles of the OBSERVED gripper, for state_mode="gripper_token".
+    # Taken from lag 0 of the history (the anchor tick's gripper), which is the
+    # exact value the prompt digitizes at train and serve time. Computed
+    # unconditionally so one stats artifact serves BOTH modes and switching
+    # state_mode needs no recompute.
+    observed_grip = history[:, 0, -1]
+    g01, g99 = (float(np.percentile(observed_grip, 1)),
+                float(np.percentile(observed_grip, 99)))
+
     stats = _norm.UmiNormStats(
         action_q01=q01,
         action_q99=q99,
         history_mean=history.mean(axis=0),
         history_std=history.std(axis=0),
         gripper_dims=grip,
+        gripper_q01=g01,
+        gripper_q99=g99,
         provenance={
             "extraction_config_hash": meta["config_hash"],
             "ego2g1_config_hash": config.config_hash(),
@@ -311,6 +322,17 @@ def main_umi(config: _config.UmiTrainConfig):
         z = (history - stats.history_mean) / np.maximum(stats.history_std, 1e-6)
         print(f"\nhistory |z|>{config.state_norm_clip} fraction: "
               f"{float((np.abs(z) > config.state_norm_clip).mean()) * 100:.4f}%")
+    # state_mode="gripper_token": how the observed gripper lands in the bins
+    from ego2g1.train import umi_transforms as _ut
+
+    bins = config.gripper_bins
+    used = np.array([_ut.digitize_gripper(v, g01, g99, bins) for v in observed_grip])
+    print(f"\ngripper state quantiles: q01={g01:.4f} q99={g99:.4f} "
+          f"(raw range {observed_grip.min():.4f}..{observed_grip.max():.4f})")
+    print(f"  -> {bins} bins: {len(np.unique(used))} distinct occupied, "
+          f"range {used.min()}..{used.max()}; "
+          f"{float((used == 0).mean()) * 100:.1f}% in bin 0, "
+          f"{float((used == bins - 1).mean()) * 100:.1f}% in bin {bins - 1}")
     print(f"\nloss_dim_weights (w_gripper={config.w_gripper}, mean 1):")
     for name, wi, v in zip(labels, w, model_space_variance, strict=True):
         print(f"  {name:>5s}  Var(x1)={v:7.4f}  Var(u)={1 + v:7.4f}  w={wi:7.4f}")

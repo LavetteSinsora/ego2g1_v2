@@ -479,6 +479,99 @@ class UmiPrompt(_transforms.DataTransformFn):
         return f"Task: {task} {marker} {HISTORY_SEGMENT} {tokens} Action: "
 
 
+def digitize_gripper(value, q01: float, q99: float, bins: int = 256) -> int:
+    """Raw gripper -> a bin index in [0, bins), via [-1, 1].
+
+    The two-step map is pi0.5's own: quantile-normalize to [-1, 1], then
+    `np.digitize` against `linspace(-1, 1, bins+1)[:-1]`. Reusing that exact
+    arithmetic (Ego2G1Tokenizer.state_str) rather than inventing a binner is
+    the point -- the digits land in the numeric range the base model saw during
+    pretraining, so they are ordinary tokens rather than novel ones.
+
+    Quantiles rather than min/max: one outlier frame would otherwise compress
+    every real value into a handful of bins.
+    """
+    span = float(q99) - float(q01)
+    if span <= 0.0:
+        raise ValueError(
+            f"gripper quantile span is {span} (q01={q01}, q99={q99}) — the "
+            "gripper never moves in this dataset, so there is nothing to bin")
+    z = 2.0 * (float(value) - float(q01)) / span - 1.0
+    z = float(np.clip(z, -1.0, 1.0))
+    edges = np.linspace(-1.0, 1.0, int(bins) + 1)[:-1]
+    return int(np.clip(np.digitize(z, bins=edges) - 1, 0, int(bins) - 1))
+
+
+@dataclasses.dataclass(frozen=True)
+class UmiGripperPrompt(_transforms.DataTransformFn):
+    """`state_mode="gripper_token"`: the gripper as DIGITS in the prompt.
+
+    ``Task: {task} <<<control_mode>>> end effector <<<control_mode>>>
+      Gripper: {bin} Action: ``
+
+    The whole proprioceptive channel, in one number. No pose history, no
+    injected embedding, and therefore no learned encoder anywhere in the param
+    tree -- which is the trade this mode exists to make: the policy cannot
+    dead-reckon off a velocity signal it was never given, at the cost of not
+    knowing how fast it is moving.
+
+    "One token" is approximate and does not matter: a 0..255 bin index
+    tokenizes to one to three sentencepiece pieces depending on its digits.
+    What matters is that the pieces are ORDINARY NUMBER tokens the base model
+    has seen, which is also what lets `diagnostics.digit_token_ids` isolate
+    this segment for the attention probe -- nothing else in this prompt
+    contains a digit.
+    """
+
+    q01: float
+    q99: float
+    bins: int = 256
+    control_mode: str = CONTROL_MODE_EEF
+    task: str = ""
+    # --- diagnostic ablations (validation pools only; never set for training) ---
+    # Replace the real bin with a random one. Asks: is the VALUE read?
+    shuffle: bool = False
+    # Drop the `Gripper: N` segment entirely. Asks a DIFFERENT question: does
+    # the policy depend on the channel EXISTING? The two come apart, and the
+    # gap between them is informative. A wrong bin is still a plausible number
+    # in a familiar slot, so a policy that has learned "there is a number here,
+    # and the prompt is shaped like this" can survive `shuffle` while
+    # collapsing when the segment vanishes — that is the model leaning on
+    # prompt STRUCTURE rather than on proprioception.
+    #
+    # Deliberately out of distribution: this mode always emits the segment
+    # during training, so a prompt without it is a probe, exactly as
+    # `val_nohist` is for the history mode.
+    include_gripper: bool = True
+
+    def __call__(self, data: dict) -> dict:
+        out = dict(data)
+        task = out.pop("prompt", None) or self.task
+        if not isinstance(task, str):
+            task = task.item()
+        if not task:
+            raise ValueError(
+                "UmiGripperPrompt needs a task string: either a `prompt` key "
+                "(PromptFromLeRobotTask) or a non-empty `task` fallback")
+        if "state" not in out:
+            raise ValueError("UmiGripperPrompt needs `state` (the current gripper)")
+        value = float(np.asarray(out["state"]).reshape(-1)[0])
+        token = (random.randrange(self.bins) if self.shuffle
+                 else digitize_gripper(value, self.q01, self.q99, self.bins))
+        out["gripper_bin"] = int(token)
+        out["prompt"] = self.build_prompt(task, int(token))
+        return out
+
+    def build_prompt(self, task: str, token: int) -> str:
+        marker = f"<<<control_mode>>> {self.control_mode} <<<control_mode>>>"
+        if not self.include_gripper:
+            # byte-identical to a zero-length history prompt (UmiPrompt at
+            # history_len=0), so the two modes' "no proprioception" ablations
+            # are the same string and their numbers are comparable
+            return f"Task: {task} {marker} Action: "
+        return f"Task: {task} {marker} Gripper: {token} Action: "
+
+
 @dataclasses.dataclass(frozen=True)
 class UmiInputs(_transforms.DataTransformFn):
     """Repack into pi0 model inputs, carrying the history through.
@@ -511,6 +604,11 @@ class UmiInputs(_transforms.DataTransformFn):
     model_type: _model.ModelType
     acting_slot: str = "right_wrist_0_rgb"
     context_is_static: bool = True
+    # False for state_mode="gripper_token": no encoder exists, so `relations`
+    # must NOT be emitted — `Ego2G1Pi0Config.inputs_spec` does not declare the
+    # field when n_objects == 0, and an undeclared input would shape-mismatch
+    # on the first real batch after init built the model without it.
+    inject: bool = True
 
     def __post_init__(self):
         if self.acting_slot not in ("left_wrist_0_rgb", "right_wrist_0_rgb"):
@@ -534,11 +632,6 @@ class UmiInputs(_transforms.DataTransformFn):
         )
         inputs = {
             "state": data["state"],
-            # `relations` is the Observation field name that ego2g1.train
-            # .observation_patch adds and that Ego2G1Pi0.embed_prefix reads. It
-            # carries the history matrix here; the name is the relational
-            # config's, kept so the injection machinery is shared verbatim.
-            "relations": data["history"],
             "image": {
                 "base_0_rgb": context,
                 self.acting_slot: acting,
@@ -550,6 +643,12 @@ class UmiInputs(_transforms.DataTransformFn):
                 idle_slot: np.False_,
             },
         }
+        if self.inject:
+            # `relations` is the Observation field name that ego2g1.train
+            # .observation_patch adds and that Ego2G1Pi0.embed_prefix reads. It
+            # carries the history matrix here; the name is the relational
+            # config's, kept so the injection machinery is shared verbatim.
+            inputs["relations"] = data["history"]
         if "actions" in data:
             inputs["actions"] = data["actions"]
         if "prompt" in data:

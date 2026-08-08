@@ -535,7 +535,32 @@ class UmiTrainConfig(_CommonTrainFields):
     action_horizon: int = 50
     control_mode: str = _transforms.CONTROL_MODE_EEF
 
-    # --- state history ---
+    # --- how proprioception reaches the model ---
+    # "history"       a window of recent MEASURED TCP poses + gripper, each
+    #                 encoded to one injected prompt token (the relational
+    #                 config's machinery). Continuous, high precision, but it
+    #                 adds a learned encoder to the param tree and gives the
+    #                 policy a velocity signal it can dead-reckon from.
+    # "gripper_token" NO pose history at all. The gripper alone, normalized to
+    #                 [-1, 1], binned into `gripper_bins` and written into the
+    #                 prompt as DIGITS — exactly how pi0.5 carries its
+    #                 discretized state. The param tree stays stock (no
+    #                 encoder is built), and the only thing the policy knows
+    #                 about its own body is whether the gripper is open.
+    #
+    # Both share everything else: dataset, 7-dim action space, per-(slot, dim)
+    # quantile normalization, camera slots, and the entire deploy conversion
+    # path. That is why this is a field rather than a fourth config family.
+    #
+    # NOTE lag 0 is gathered in BOTH modes: it is the chunk's anchor, not just
+    # a history token (umi_transforms.UmiRelativeActions reads poses[0]).
+    state_mode: Literal["history", "gripper_token"] = "history"
+    # Bins for the "gripper_token" digitization. 256 is pi0.5's own state
+    # resolution, so the digits land in the same numeric range the base model
+    # saw pretraining.
+    gripper_bins: int = 256
+
+    # --- state history (state_mode="history" only) ---
     # Number of PAST lags. Total injected tokens is history_lags + 1, because
     # lag 0 (the anchor's own tick) is a token too: its pose part is
     # structurally zero but it carries the CURRENT gripper, which
@@ -605,16 +630,24 @@ class UmiTrainConfig(_CommonTrainFields):
             )
         if self.hand not in ("left", "right"):
             raise ValueError(f"hand={self.hand!r} must be 'left' or 'right'")
-        if len(self.history_len_probs) != self.n_lags + 1:
-            raise ValueError(
-                f"history_len_probs has {len(self.history_len_probs)} entries, expected "
-                f"{self.n_lags + 1} (one per achievable length 0..{self.n_lags})"
-            )
-        if any(p < 0 for p in self.history_len_probs):
-            raise ValueError(f"history_len_probs={self.history_len_probs} has a negative entry")
-        total = sum(self.history_len_probs)
-        if not 0.999 <= total <= 1.001:
-            raise ValueError(f"history_len_probs sums to {total}, expected 1.0")
+        if self.state_mode not in ("history", "gripper_token"):
+            raise ValueError(f"state_mode={self.state_mode!r} must be "
+                             "'history' or 'gripper_token'")
+        if self.state_mode == "gripper_token":
+            if self.gripper_bins < 2:
+                raise ValueError(f"gripper_bins={self.gripper_bins} must be >= 2")
+        else:
+            # length draws are meaningless without a history to truncate
+            if len(self.history_len_probs) != self.n_lags + 1:
+                raise ValueError(
+                    f"history_len_probs has {len(self.history_len_probs)} entries, expected "
+                    f"{self.n_lags + 1} (one per achievable length 0..{self.n_lags})"
+                )
+            if any(p < 0 for p in self.history_len_probs):
+                raise ValueError(f"history_len_probs={self.history_len_probs} has a negative entry")
+            total = sum(self.history_len_probs)
+            if not 0.999 <= total <= 1.001:
+                raise ValueError(f"history_len_probs sums to {total}, expected 1.0")
         if self.model_space_clamp is not None and self.model_space_clamp <= 1.0:
             raise ValueError(f"model_space_clamp={self.model_space_clamp} must be > 1 (or None)")
         if self.state_norm_clip <= 1.0:
@@ -626,14 +659,28 @@ class UmiTrainConfig(_CommonTrainFields):
 
     @property
     def n_lags(self) -> int:
-        """Number of injected history tokens: the past lags plus lag 0."""
-        return self.history_lags + 1
+        """How many ticks are gathered backwards. In "history" mode these are
+        the injected tokens; in "gripper_token" mode it is just the anchor."""
+        return len(self.lag_ticks)
 
     @property
     def lag_ticks(self) -> tuple[int, ...]:
+        """Tick offsets gathered backwards, most recent first.
+
+        "gripper_token" still needs lag 0 — that is the chunk's ANCHOR, which
+        every mode composes its actions onto — but nothing older.
+        """
         from ego2g1.train import umi_transforms as _ut
 
+        if self.state_mode == "gripper_token":
+            return (0,)
         return _ut.lag_ticks(self.history_lags, self.history_stride)
+
+    @property
+    def injects_tokens(self) -> bool:
+        """Whether a learned encoder writes into the prompt. False keeps the
+        param tree bit-for-bit stock pi05."""
+        return self.state_mode == "history"
 
     @property
     def history_dim(self) -> int:
@@ -661,7 +708,10 @@ class UmiTrainConfig(_CommonTrainFields):
             rtc_training=self.rtc_training,
             rtc_d_max=self.rtc_d_max,
             discrete_state_input=True,   # unused: our prompt builder owns the string
-            n_objects=self.n_lags,
+            # 0 => no encoder is built at all and the param tree is bit-for-bit
+            # stock pi05 (ego2g1.train.model builds RelationEncoder only when
+            # n_objects > 0, and embed_prefix short-circuits on it being None).
+            n_objects=self.n_lags if self.injects_tokens else 0,
             relation_dim=self.history_dim,
             relation_hidden=self.history_hidden,
             grasp_head=False,
@@ -670,7 +720,7 @@ class UmiTrainConfig(_CommonTrainFields):
             # the injected rows are an ORDERED sequence, not an unordered set:
             # report the most-recent-vs-most-stale separation instead of the
             # object config's mean pairwise angle.
-            inject_ordered=True,
+            inject_ordered=self.injects_tokens,
         )
 
     def weight_loader(self) -> _weight_loaders.WeightLoader:
@@ -686,7 +736,10 @@ class UmiTrainConfig(_CommonTrainFields):
             # serving MUST invert the per-(slot, dim) quantile normalization
             "action_norm_scheme": {"required": True, "scheme": self.action_norm_scheme},
             # serving MUST build the history rows and run the encoder
-            "state_history": {
+            # Present only in "history" mode: serving must build the history
+            # rows and run the encoder. A gripper_token checkpoint has no
+            # encoder and must not be served as though it did.
+            **({"state_history": {
                 "required": True,
                 "n_lags": self.n_lags,
                 "history_dim": self.history_dim,
@@ -694,7 +747,15 @@ class UmiTrainConfig(_CommonTrainFields):
                 "clip": self.state_norm_clip,
                 # measured, never commanded — see umi_transforms' docstring
                 "pose_source": "measured",
-            },
+            }} if self.injects_tokens else {
+                # serving MUST digitize the gripper into the prompt with the
+                # SAME bins and the SAME quantiles training used — a different
+                # binning is a silently different state.
+                "gripper_token": {
+                    "required": True,
+                    "bins": self.gripper_bins,
+                    "pose_source": "measured",
+                }}),
             # serving MUST decode rotation-VECTOR rotations, not 6d
             "relative_eef_rotvec_actions": {"required": True},
             # serving MUST send a continuous gripper, not a binary open/closed

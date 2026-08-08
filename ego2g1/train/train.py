@@ -1031,14 +1031,30 @@ def main_umi(config: _config.UmiTrainConfig):
     val_pools: dict[str, list] = {}
     if config.eval_interval > 0 and config.val_source_episodes:
         val_dataset = _umi_dataset.create_umi_dataset(config, model_config, split="val")
-        history_pool = _umi_dataset.umi_raw_history(config, split="val", full_only=True)
         full = config.n_lags
-        pool_kwargs = {
-            "val": {"history_fixed_len": full},
-            "val_permuted": {"history_fixed_len": full, "permute_history": True},
-            "val_random": {"history_fixed_len": full, "history_pool": history_pool},
-            "val_nohist": {"history_fixed_len": 0},
-        }
+        if config.injects_tokens:
+            history_pool = _umi_dataset.umi_raw_history(config, split="val", full_only=True)
+            pool_kwargs = {
+                "val": {"history_fixed_len": full},
+                "val_permuted": {"history_fixed_len": full, "permute_history": True},
+                "val_random": {"history_fixed_len": full, "history_pool": history_pool},
+                "val_nohist": {"history_fixed_len": 0},
+            }
+        else:
+            # state_mode="gripper_token": there is no history to permute. The
+            # only proprioceptive channel is the binned gripper, and it gets
+            # the same TWO questions the history gets, which come apart:
+            #   val_shuffled_gripper  a WRONG bin      — is the value read?
+            #   val_no_gripper        NO segment at all — is the channel used?
+            # A policy that has learned "there is a number in this slot, and
+            # the prompt is shaped like this" can survive a wrong value while
+            # collapsing when the segment vanishes; that gap is the model
+            # leaning on prompt structure rather than proprioception.
+            pool_kwargs = {
+                "val": {},
+                "val_shuffled_gripper": {"shuffle_gripper": True},
+                "val_no_gripper": {"omit_gripper": True},
+            }
         for prefix, kwargs in pool_kwargs.items():
             pool_cfg = _data_config.create_umi_data_config(
                 config, model_config, stats_dir=stats_dir, **kwargs
@@ -1126,9 +1142,13 @@ def main_umi(config: _config.UmiTrainConfig):
             # by eyeballing four curves.
             base = float(val_reduced["val/loss"])
             if base > 0:
-                val_reduced["history/permuted_over_real"] = float(val_reduced["val_permuted/loss"]) / base
-                val_reduced["history/random_over_real"] = float(val_reduced["val_random/loss"]) / base
-                val_reduced["history/nohist_over_real"] = float(val_reduced["val_nohist/loss"]) / base
+                for key, name in (("val_permuted", "history/permuted_over_real"),
+                                  ("val_random", "history/random_over_real"),
+                                  ("val_nohist", "history/nohist_over_real"),
+                                  ("val_shuffled_gripper", "state/shuffled_gripper_over_real"),
+                                  ("val_no_gripper", "state/no_gripper_over_real")):
+                    if f"{key}/loss" in val_reduced:
+                        val_reduced[name] = float(val_reduced[f"{key}/loss"]) / base
             pbar.write(f"Step {step} [val]: " + ", ".join(f"{k}={v:.4f}" for k, v in val_reduced.items()))
             wandb.log(val_reduced, step=step)
             _save_best(best_manager, train_state, data_loader, step, base)
@@ -1162,13 +1182,16 @@ def _umi_attention_probe(config: _config.UmiTrainConfig, state, val_batch) -> di
     model = nnx.merge(state.model_def, params)
     model.eval()
     obs, actions = jax.tree.map(lambda x: x[: config.probe_batch_size], val_batch)
-    out = _diagnostics.attention_allocation(
-        model, obs, actions,
-        segment_masks=_diagnostics.umi_segment_masks(
+    if config.injects_tokens:
+        kwargs = {"segment_masks": _diagnostics.umi_segment_masks(
             obs, sentinel_id=config.model_config().relation_sentinel_id,
-            n_lags=config.n_lags, lag_ticks=config.lag_ticks,
-        ),
-    )
+            n_lags=config.n_lags, lag_ticks=config.lag_ticks)}
+    else:
+        # state_mode="gripper_token": the state IS digits, so the stock
+        # digit-token split isolates it exactly — nothing else in this prompt
+        # (the task string, the control-mode marker) contains a number.
+        kwargs = {"state_token_ids": _diagnostics.digit_token_ids()}
+    out = _diagnostics.attention_allocation(model, obs, actions, **kwargs)
     per_layer = out["per_layer"]
     payload = {}
     for g, name in enumerate(out["group_names"]):

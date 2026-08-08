@@ -44,6 +44,9 @@ SUPPORTED_FEATURES = frozenset({
     # prompt tokens (`action_norm_scheme` and `relative_eef_rotvec_actions`
     # above are shared with the relational config)
     "state_history",
+    # the gripper alone, binned into the prompt as pi05-style digits
+    # (state_mode="gripper_token"); mutually exclusive with state_history
+    "gripper_token",
     # continuous gripper: deploy must send an aperture, not an open/closed step
     "continuous_gripper",
     # which camera goes in which slot, and the static-context assumption that

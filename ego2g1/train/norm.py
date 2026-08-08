@@ -255,6 +255,15 @@ class UmiNormStats:
     history_std: np.ndarray      # (n_lags, 7)
     gripper_dims: tuple[int, ...]
     provenance: dict
+    # Scalar quantiles of the OBSERVED gripper, for state_mode="gripper_token"'s
+    # digitization. Separate from the per-(slot, dim) action grid above, which
+    # normalizes the gripper TARGET: this one normalizes the gripper STATE, and
+    # the two are one tick apart. Quantiles rather than min/max so one outlier
+    # frame cannot compress every real value into a few bins. NaN on artifacts
+    # written before this field existed — `load_umi` fills them in from the
+    # history stats so an old file still serves a "history" checkpoint.
+    gripper_q01: float = float("nan")
+    gripper_q99: float = float("nan")
 
     def __post_init__(self):
         if self.action_q01.shape != self.action_q99.shape:
@@ -280,6 +289,8 @@ def save_umi(directory: pathlib.Path | str, stats: UmiNormStats) -> None:
         history_mean=stats.history_mean,
         history_std=stats.history_std,
         gripper_dims=np.asarray(stats.gripper_dims, dtype=np.int64),
+        gripper_quantiles=np.asarray([stats.gripper_q01, stats.gripper_q99],
+                                     dtype=np.float64),
         provenance=json.dumps(stats.provenance),
     )
 
@@ -292,12 +303,16 @@ def load_umi(directory: pathlib.Path | str) -> UmiNormStats:
             "(the UMI config needs the per-slot quantile grid and the per-lag history stats)"
         )
     with np.load(path, allow_pickle=False) as z:
+        gq = (np.asarray(z["gripper_quantiles"], dtype=np.float64)
+              if "gripper_quantiles" in z.files else np.array([np.nan, np.nan]))
         return UmiNormStats(
             action_q01=np.asarray(z["action_q01"], dtype=np.float64),
             action_q99=np.asarray(z["action_q99"], dtype=np.float64),
             history_mean=np.asarray(z["history_mean"], dtype=np.float64),
             history_std=np.asarray(z["history_std"], dtype=np.float64),
             gripper_dims=tuple(int(d) for d in z["gripper_dims"]),
+            gripper_q01=float(gq[0]),
+            gripper_q99=float(gq[1]),
             provenance=json.loads(str(z["provenance"])),
         )
 

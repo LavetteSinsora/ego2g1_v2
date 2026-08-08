@@ -421,6 +421,138 @@ def test_deploy_layout_agrees_with_the_training_config():
     assert umi_layout.default_lag_ticks() == c.lag_ticks
 
 
+# ------------------------------------------------------- state_mode variants
+
+
+def test_gripper_token_mode_gathers_only_the_anchor():
+    """No pose history — but lag 0 still comes back, because it is the chunk's
+    ANCHOR, not just a history token."""
+    c = _config.UmiTrainConfig(state_mode="gripper_token")
+    assert c.lag_ticks == (0,)
+    assert c.n_lags == 1
+    assert c.injects_tokens is False
+
+
+def test_gripper_token_mode_builds_a_STOCK_param_tree():
+    """n_objects=0 means ego2g1.train.model never constructs RelationEncoder,
+    so the checkpoint has the same parameters as plain pi05."""
+    mc = _config.UmiTrainConfig(state_mode="gripper_token").model_config()
+    assert mc.n_objects == 0
+    assert mc.inject_ordered is False
+    assert mc.grasp_head is False
+    assert mc.action_dim_actual == 7        # the action space is unchanged
+
+
+def test_history_mode_is_unchanged_by_the_new_field():
+    c = _config.UmiTrainConfig()
+    assert c.state_mode == "history"
+    assert c.lag_ticks == (0, 3, 6, 9, 12, 15) and c.n_lags == 6
+    assert c.injects_tokens is True
+    assert c.model_config().n_objects == 6
+
+
+def test_the_two_modes_require_mutually_exclusive_serving_features():
+    hist = _config.UmiTrainConfig().feature_flags()
+    tok = _config.UmiTrainConfig(state_mode="gripper_token").feature_flags()
+    assert hist["state_history"]["required"] is True and "gripper_token" not in hist
+    assert tok["gripper_token"]["required"] is True and "state_history" not in tok
+    assert tok["gripper_token"]["bins"] == 256
+    # both must still be declared servable
+    from ego2g1.train import stamp as _stamp
+    for flags in (hist, tok):
+        req = {k for k, v in flags.items() if isinstance(v, dict) and v.get("required")}
+        assert req <= _stamp.SUPPORTED_FEATURES
+
+
+def test_gripper_token_mode_skips_the_history_length_validation():
+    """history_len_probs is sized for the history grid; it is meaningless when
+    there is no history, so it must not be validated against n_lags=1."""
+    c = _config.UmiTrainConfig(state_mode="gripper_token")
+    assert len(c.history_len_probs) == 7 and c.n_lags == 1   # would fail in history mode
+
+
+@pytest.mark.parametrize("bad", [{"state_mode": "elsewhere"},
+                                 {"state_mode": "gripper_token", "gripper_bins": 1}])
+def test_bad_state_mode_settings_are_refused(bad):
+    with pytest.raises(ValueError):
+        _config.UmiTrainConfig(**bad)
+
+
+def test_gripper_digitization_matches_the_pi05_scheme():
+    """Quantile-normalize to [-1,1], then pi05's own 256-bin digitize. Reusing
+    that arithmetic is what keeps the digits ordinary number tokens."""
+    q01, q99 = 1.2, 5.4
+    assert _ut.digitize_gripper(q01, q01, q99, 256) == 0
+    assert _ut.digitize_gripper(q99, q01, q99, 256) == 255
+    mid = _ut.digitize_gripper((q01 + q99) / 2, q01, q99, 256)
+    assert 126 <= mid <= 129
+    # monotone, and clipped rather than wrapped outside the quantile range
+    assert _ut.digitize_gripper(q01 - 10, q01, q99, 256) == 0
+    assert _ut.digitize_gripper(q99 + 10, q01, q99, 256) == 255
+    seq = [_ut.digitize_gripper(v, q01, q99, 256) for v in np.linspace(q01, q99, 50)]
+    assert seq == sorted(seq)
+
+
+def test_gripper_digitization_refuses_a_dead_column():
+    with pytest.raises(ValueError, match="never moves"):
+        _ut.digitize_gripper(1.0, 2.0, 2.0, 256)
+
+
+def test_gripper_prompt_is_the_requested_shape():
+    p = _ut.UmiGripperPrompt(q01=1.2, q99=5.4, bins=256, task="fallback")
+    out = p({"prompt": "put the bottle in the box", "state": np.array([4.93])})
+    assert out["prompt"] == (
+        "Task: put the bottle in the box "
+        "<<<control_mode>>> end effector <<<control_mode>>> "
+        f"Gripper: {out['gripper_bin']} Action: ")
+    assert "State history:" not in out["prompt"]
+    assert _ut.HISTORY_SENTINEL not in out["prompt"]
+
+
+def test_omit_gripper_drops_the_whole_segment():
+    """val_no_gripper: asks whether the CHANNEL is used, not whether the value
+    is read. A wrong bin is still a plausible number in a familiar slot."""
+    p = _ut.UmiGripperPrompt(q01=1.2, q99=5.4, bins=256, task="t",
+                             include_gripper=False)
+    out = p({"prompt": "put the bottle in the box", "state": np.array([4.93])})
+    assert "Gripper:" not in out["prompt"]
+    assert out["prompt"] == (
+        "Task: put the bottle in the box "
+        "<<<control_mode>>> end effector <<<control_mode>>> Action: ")
+    # the bin is still computed and reported, it just does not reach the prompt
+    assert 0 <= out["gripper_bin"] < 256
+
+
+def test_the_two_modes_no_proprioception_prompts_are_identical():
+    """`val_no_gripper` and history mode's `val_nohist` must produce the SAME
+    string, or the two experiments' no-proprioception numbers are not
+    comparable."""
+    task = "put the bottle in the box"
+    tok = _ut.UmiGripperPrompt(q01=1.2, q99=5.4, bins=256,
+                               include_gripper=False).build_prompt(task, 0)
+    hist = _ut.UmiPrompt().build_prompt(task, 0)
+    assert tok == hist
+
+
+def test_gripper_prompt_shuffle_ablation_changes_only_the_bin():
+    p = _ut.UmiGripperPrompt(q01=1.2, q99=5.4, bins=256, task="t", shuffle=True)
+    seen = {p({"state": np.array([4.93])})["gripper_bin"] for _ in range(60)}
+    assert len(seen) > 1, "the shuffled pool must actually randomize the bin"
+
+
+def test_inputs_omit_relations_when_nothing_is_injected():
+    """inputs_spec does not declare `relations` at n_objects=0, so emitting it
+    would shape-mismatch on the first real batch."""
+    from openpi.models import model as _m
+
+    sample = _inputs_sample()
+    out = _ut.UmiInputs(model_type=_m.ModelType.PI0, inject=False)(sample)
+    assert "relations" not in out
+    assert out["image_mask"]["base_0_rgb"] and out["image_mask"]["right_wrist_0_rgb"]
+    out = _ut.UmiInputs(model_type=_m.ModelType.PI0, inject=True)(sample)
+    assert out["relations"].shape == (3, 7)
+
+
 def test_relation_config_is_untouched_by_inject_ordered():
     """The UMI config must not have changed the relational one's behaviour."""
     mc = _config.EgoRelationTrainConfig().model_config()

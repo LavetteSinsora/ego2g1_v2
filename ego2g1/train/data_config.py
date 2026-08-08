@@ -203,6 +203,8 @@ def create_umi_data_config(
     history_fixed_len: int | None = None,
     permute_history: bool = False,
     history_pool: np.ndarray | None = None,
+    shuffle_gripper: bool = False,
+    omit_gripper: bool = False,
 ) -> _config.DataConfig:
     """Assemble the UMI DataConfig (`UmiTrainConfig`).
 
@@ -272,21 +274,52 @@ def create_umi_data_config(
         _transforms.PadStatesAndActions(model_config.action_dim),
     ]
 
+    inject = train_config.injects_tokens
+    if inject:
+        prompt_tf = _ut.UmiPrompt(control_mode=train_config.control_mode)
+    else:
+        # state_mode="gripper_token": the gripper is BINNED into the prompt
+        # instead of encoded into a token, so the quantiles must come from the
+        # stats artifact. `skip_norm_stats` is only used by compute_norm_stats
+        # itself, which never reaches the prompt builder.
+        if skip_norm_stats:
+            prompt_tf = _ut.UmiGripperPrompt(q01=0.0, q99=1.0,
+                                             bins=train_config.gripper_bins,
+                                             control_mode=train_config.control_mode)
+        else:
+            if stats.gripper_q01 != stats.gripper_q01:      # NaN
+                raise ValueError(
+                    f"{stats_dir} carries no gripper quantiles; state_mode="
+                    "'gripper_token' cannot digitize without them. Re-run "
+                    "`python -m ego2g1.train.compute_norm_stats --umi` with this "
+                    "code version.")
+            prompt_tf = _ut.UmiGripperPrompt(
+                q01=stats.gripper_q01, q99=stats.gripper_q99,
+                bins=train_config.gripper_bins,
+                control_mode=train_config.control_mode,
+                shuffle=shuffle_gripper,
+                include_gripper=not omit_gripper)
+
     data_transforms = _transforms.Group(
         inputs=[
             _ut.UmiSplitGathered(n_lags=n_lags),
             _ut.UmiRelativeActions(),
+            # Runs in BOTH modes: it produces `state` (the current gripper),
+            # which the gripper-token prompt digitizes. In gripper_token mode
+            # n_lags is 1, so the "history" it builds is just the anchor row
+            # and nothing is injected from it.
             _ut.UmiStateHistory(
                 length_probs=history_length_probs,
                 fixed_len=history_fixed_len,
                 permute=permute_history,
                 pool=history_pool,
             ),
-            _ut.UmiPrompt(control_mode=train_config.control_mode),
+            prompt_tf,
             _ut.UmiInputs(
                 model_type=model_config.model_type,
                 acting_slot=train_config.acting_slot,
                 context_is_static=train_config.context_is_static,
+                inject=inject,
             ),
         ],
         outputs=[_ut.UmiOutputs(action_dim=train_config.action_dim_actual)],
