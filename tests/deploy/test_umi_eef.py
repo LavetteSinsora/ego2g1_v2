@@ -6,6 +6,8 @@ camera, or a radian gripper command crushed to 1.0 all produce a plausible
 rollout that is simply wrong.
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -322,11 +324,16 @@ def _probe_executor(robot_type="unitree_g1_dex1"):
     """A UnitreeExecutor with only the fields the pure-logic methods touch."""
     from ego2g1.deploy.core.executor import UnitreeExecutor
 
+    import threading
+
     ex = UnitreeExecutor.__new__(UnitreeExecutor)
     ex._ee = UnitreeExecutor._EE_LAYOUTS[robot_type]
     ex.robot_type = robot_type
     ex._last_sent = None
     ex._limp = {}
+    ex._limp_tauff = {}
+    ex._limp_stop = threading.Event()
+    ex._limp_thread = None
     return ex
 
 
@@ -366,15 +373,9 @@ def test_limp_zeroes_only_that_arms_gains_and_unlimp_restores_them_exactly():
     connect() configured rather than a recomputed guess."""
     pytest.importorskip("unitree_deploy")
 
-    class _Cmd:
-        def __init__(self, kp, kd): self.kp, self.kd = kp, kd
-
-    class _Ctrl:
-        def __init__(self): self.msg = type("M", (), {"motor_cmd": {}})()
-
-    ctrl = _Ctrl()
+    ctrl = _FakeCtrl()
     for i in range(15, 29):
-        ctrl.msg.motor_cmd[i] = _Cmd(80.0 + i, 3.0)
+        ctrl.msg.motor_cmd[i].kp, ctrl.msg.motor_cmd[i].kd = 80.0 + i, 3.0
     before = {i: (ctrl.msg.motor_cmd[i].kp, ctrl.msg.motor_cmd[i].kd) for i in range(15, 29)}
 
     ex = _probe_executor()
@@ -433,6 +434,71 @@ def test_wait_for_start_pose_warns_and_continues_on_timeout():
     ex._arm_controller = lambda: _Ctrl()
     ex.arm_q = lambda: np.full(_actions.ARM_DOF, 1.5)      # never arrives
     assert ex.wait_for_start_pose(timeout=0.15, tol=0.05, settle_s=0.0) is False
+
+
+class _FakeCtrl:
+    """Enough of the vendor arm controller for the limp/gravity-comp paths."""
+
+    def __init__(self):
+        import threading as _t
+        self.ctrl_lock = _t.Lock()
+        self.init_pose = np.zeros(_actions.ARM_DOF)
+        self.tauff_target = np.zeros(_actions.ARM_DOF)
+        self.q = np.zeros(_actions.ARM_DOF)
+        cmd = type("C", (), {})
+        self.msg = type("M", (), {"motor_cmd": {}})()
+        for i in range(15, 29):
+            c = cmd(); c.kp, c.kd = 90.0, 3.0
+            self.msg.motor_cmd[i] = c
+
+    def read_current_arm_q(self):
+        return self.q.copy()
+
+    def arm_tau(self, q, dq=None):
+        # stand-in for pin.rnea: a torque that DEPENDS on configuration, which
+        # is the whole point — a constant would not reproduce the drift
+        return 2.0 * np.asarray(q, dtype=np.float64)
+
+
+def test_gravity_comp_tracks_the_MEASURED_pose_not_the_frozen_target():
+    """THE fix for the runaway. The vendor freezes tau_ff at the commanded
+    pose, so with kp=0 the arm is weightless only there and creeps everywhere
+    else. Live comp must follow the arm as it is moved."""
+    pytest.importorskip("unitree_deploy")
+    ctrl = _FakeCtrl()
+    ex = _probe_executor()
+    ex._arm_controller = lambda: ctrl
+    ex.limp_arm("left", kd=2.0)
+    try:
+        for pose in (0.3, -0.7):
+            ctrl.q = np.full(_actions.ARM_DOF, pose)     # operator moves the arm
+            deadline = time.monotonic() + 2.0
+            want = 2.0 * pose
+            while time.monotonic() < deadline:
+                if abs(float(ctrl.tauff_target[0]) - want) < 1e-9:
+                    break
+                time.sleep(0.01)
+            left = ctrl.tauff_target[layout.ARM_SLICE["left"]]
+            right = ctrl.tauff_target[layout.ARM_SLICE["right"]]
+            np.testing.assert_allclose(left, want, atol=1e-9)
+            # the CONTROLLED arm's feedforward must be left alone
+            np.testing.assert_allclose(right, 0.0, atol=1e-12)
+    finally:
+        ex._stop_gravity_comp()
+
+
+def test_gravity_comp_thread_dies_on_estop_and_close():
+    """It writes torque every cycle; surviving an e-stop would put torque back
+    in immediately after damp() published zero."""
+    pytest.importorskip("unitree_deploy")
+    ctrl = _FakeCtrl()
+    ex = _probe_executor()
+    ex._arm_controller = lambda: ctrl
+    ex.limp_arm("left")
+    assert ex._limp_thread is not None and ex._limp_thread.is_alive()
+    ex._stop_gravity_comp()
+    assert ex._limp_thread is None
+    assert ex.limp_hands == ()
 
 
 def test_unlimp_is_a_noop_when_nothing_is_limp():

@@ -127,6 +127,9 @@ class UnitreeExecutor:
         self._last_q: np.ndarray | None = None
         self._last_ee: dict | None = None   # filled by arm_q(), read by ee_q()
         self._limp: dict[str, dict] = {}    # hand -> {motor id: (kp, kd)} saved
+        self._limp_tauff: dict[str, np.ndarray] = {}
+        self._limp_stop = threading.Event()
+        self._limp_thread: threading.Thread | None = None
         self._last_q_change_t = time.monotonic()
         self._last_sent: tuple[float, np.ndarray] | None = None  # telemetry only
 
@@ -156,9 +159,22 @@ class UnitreeExecutor:
         self._robot.connect()
         self._connected = True
 
+    def _stop_gravity_comp(self) -> None:
+        """Kill the live-compensation thread. It writes into the controller's
+        feedforward torque every cycle, so it must not outlive an e-stop or a
+        close — damp() publishes zero stiffness and zero tau, and a comp thread
+        still running would put torque straight back."""
+        self._limp_stop.set()
+        if self._limp_thread is not None:
+            self._limp_thread.join(timeout=1.0)
+            self._limp_thread = None
+        self._limp.clear()
+        self._limp_tauff.clear()
+
     def close(self) -> None:
         """Normal release: unitree_deploy drives to its init pose, then lets go.
         After an e-stop, do NOT let it re-energise the arm — damp was final."""
+        self._stop_gravity_comp()
         if self._connected and not self._estopped:
             self._robot.disconnect()
         self._connected = False
@@ -368,8 +384,56 @@ class UnitreeExecutor:
 
         return list(G1_29_JointArmIndex)[layout.ARM_SLICE[hand]]
 
+    def _gravity_comp_loop(self, hz: float = 100.0) -> None:
+        """Keep the LIMP arm's feedforward torque matched to where it ACTUALLY is.
+
+        This is what makes a limp arm hold position instead of running away.
+        With kp = 0 the joint torque is `-kd*dq + tau_ff`, and the vendor sets
+        `tau_ff = arm_tau(q_target)` ONCE, from the commanded pose, then freezes
+        it (`write_arm`). `arm_tau` is `pin.rnea(model, data, q, 0, 0)` — pure
+        gravity compensation — so the arm is weightless only AT that one pose.
+        Move it anywhere else and the frozen torque no longer cancels gravity;
+        the residual is a constant net torque with no position gain to oppose
+        it, so the joint accelerates until damping caps it and the arm creeps
+        continuously in whatever direction you nudged it.
+
+        Recomputing from the MEASURED joints closes that gap: gravity is
+        cancelled everywhere in the workspace, leaving `-kd*dq`, which is pure
+        damping. The arm then floats where you put it.
+
+        Only the limp joints' entries are touched; the controlled arm keeps the
+        feedforward the vendor gave it. A NEW array is published under the
+        controller's own lock rather than mutating in place, because the publish
+        loop reads that attribute once per cycle and would otherwise see a
+        half-written vector.
+        """
+        ctrl = self._arm_controller()
+        period = 1.0 / float(hz)
+        warned = False
+        while not self._limp_stop.is_set():
+            try:
+                q = np.asarray(ctrl.read_current_arm_q(), dtype=np.float64)
+                tau = ctrl.arm_tau(q)
+                if tau is None:
+                    raise RuntimeError("arm_tau returned None")
+                tau = np.asarray(tau, dtype=np.float64).reshape(-1)[: _actions.ARM_DOF]
+                with ctrl.ctrl_lock:
+                    cur = np.asarray(ctrl.tauff_target, dtype=np.float64).copy()
+                    for hand in list(self._limp):
+                        sl = layout.ARM_SLICE[hand]
+                        cur[sl] = tau[sl]
+                    ctrl.tauff_target = cur
+            except Exception as exc:  # noqa: BLE001
+                if not warned:
+                    warned = True
+                    logger.warning(
+                        "live gravity compensation failed (%s) — the limp arm "
+                        "will DRIFT rather than hold position. Support it.", exc)
+            time.sleep(period)
+
     def limp_arm(self, hand: str, *, kd: float = 2.0) -> None:
-        """Make ONE arm back-drivable: zero its position gain, keep damping.
+        """Make ONE arm back-drivable and weightless: zero its position gain,
+        keep damping, and stream live gravity compensation to it.
 
         Safe to do while the publish thread runs, because that thread never
         rewrites gains — `_update_g1_arm` writes only q/dq/tau per joint and
@@ -377,6 +441,8 @@ class UnitreeExecutor:
         other arm is untouched and stays fully controlled.
 
         DANGER: a limp arm falls under gravity. Support it before calling this.
+        Gravity compensation makes it hold position, but it is a torque
+        estimate, not a brake — a payload or a bad model still lets it sag.
 
         The previous gains are saved so `unlimp_arm` restores exactly what
         `connect()` configured, rather than recomputing them from config and
@@ -389,9 +455,19 @@ class UnitreeExecutor:
                              float(ctrl.msg.motor_cmd[i].kd))
             ctrl.msg.motor_cmd[i].kp = 0.0
             ctrl.msg.motor_cmd[i].kd = float(kd)
+        with ctrl.ctrl_lock:
+            self._limp_tauff.setdefault(
+                hand, np.asarray(ctrl.tauff_target, dtype=np.float64).copy())
         self._limp[hand] = saved
-        logger.warning("%s arm is now LIMP (kp=0, kd=%.2f) — it will fall if "
-                       "unsupported. It re-stiffens on Start.", hand, kd)
+        if self._limp_thread is None or not self._limp_thread.is_alive():
+            self._limp_stop.clear()
+            self._limp_thread = threading.Thread(
+                target=self._gravity_comp_loop, name="ego2g1-gravity-comp",
+                daemon=True)
+            self._limp_thread.start()
+        logger.warning("%s arm is now LIMP (kp=0, kd=%.2f) with LIVE gravity "
+                       "compensation — support it; it re-stiffens on Start.",
+                       hand, kd)
 
     def unlimp_arm(self, hand: str, *, settle_s: float = 0.8) -> None:
         """Restore an arm's gains, WITHOUT snapping it back.
@@ -407,6 +483,14 @@ class UnitreeExecutor:
         saved = self._limp.pop(hand, None)
         if not saved:
             return
+        if not self._limp:                       # last one out stops the thread
+            self._limp_stop.set()
+            if self._limp_thread is not None:
+                self._limp_thread.join(timeout=1.0)
+                self._limp_thread = None
+        # Stream the MEASURED pose until the interpolator has converged on it,
+        # so re-stiffening holds where the operator left the arm instead of
+        # yanking it back to the stale init-pose target.
         deadline = time.monotonic() + settle_s
         while time.monotonic() < deadline:
             self.hold()
@@ -415,6 +499,11 @@ class UnitreeExecutor:
         for i, (kp, kd) in saved.items():
             ctrl.msg.motor_cmd[i].kp = kp
             ctrl.msg.motor_cmd[i].kd = kd
+        # The feedforward torque needs no restoring: every `hold()` above went
+        # through the vendor's `write_arm`, which recomputes tauff from the new
+        # target, so our live-comp values are already superseded by a correct
+        # one for where the arm now is. Just drop the saved copy.
+        self._limp_tauff.pop(hand, None)
         logger.info("%s arm gains restored; holding where you left it", hand)
 
     def unlimp_all(self, *, settle_s: float = 0.8) -> None:
@@ -455,6 +544,9 @@ class UnitreeExecutor:
         rather than pretending to stop.
         """
         self._estopped = True   # latch first: send() is off from here on
+        # ...and kill live gravity compensation before publishing zero torque,
+        # or it would keep writing tau back in behind the e-stop.
+        self._stop_gravity_comp()
         if not self._connected:
             return
         try:
