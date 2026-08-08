@@ -155,8 +155,16 @@ try:
             f"history run needs {rv.n_lags}. It was computed in gripper_token mode; "
             "recompute it WITHOUT --state-mode (history is the default) — the "
             "resulting artifact serves both modes")
-except FileNotFoundError as e:
-    bad.append(f"rotvec stats missing: {e}")
+except FileNotFoundError:
+    bad.append(
+        f"{rv.stats_dir}/umi_stats.npz is missing. Do NOT recompute it: the two "
+        "runs being resumed already trained 9999 steps against a specific grid, "
+        "and a recomputed one cannot be shown equal to it. Restore the copy those "
+        "runs saved into their own checkpoints:\n"
+        f"      python -m tools.restore_umi_stats \\\n"
+        f"          --source {pathlib.Path(runs) / rv.name / exp_hist} \\\n"
+        f"          --also   {pathlib.Path(runs) / rv.name / exp_tok} \\\n"
+        f"          --assets-base-dir {assets}")
 
 for exp, mode in ((exp_hist, "history"), (exp_tok, "gripper_token")):
     d = pathlib.Path(runs) / rv.name / exp
@@ -175,11 +183,37 @@ for exp, mode in ((exp_hist, "history"), (exp_tok, "gripper_token")):
     if stamp.exists():
         import json
         cfg = json.loads(stamp.read_text()).get("ego2g1_config", {})
-        got = cfg.get("rotation_repr", "rotvec")   # absent on pre-knob stamps
+        # Both fields are ABSENT on stamps written before their knob existed,
+        # and in both cases the absence pins the value: there was only the
+        # rotvec path before rotation_repr, and only the history path before
+        # state_mode (gripper_token arrived with it, in c4cecbb). Defaulting is
+        # therefore a fact, not a guess — but it is only as good as the stamp,
+        # so the lag grid below confirms it from the artifact instead.
+        got = cfg.get("rotation_repr", "rotvec")
         if got != "rotvec":
             bad.append(f"{stamp} says rotation_repr={got!r}, expected 'rotvec'")
-        if cfg.get("state_mode") != mode:
-            bad.append(f"{stamp} says state_mode={cfg.get('state_mode')!r}, expected {mode!r}")
+        got_mode = cfg.get("state_mode", "history")
+        if got_mode != mode:
+            bad.append(f"{stamp} says state_mode={got_mode!r}, expected {mode!r}")
+
+    # Positive confirmation, independent of the stamp: the run's OWN stats copy
+    # records the lag grid it trained with. A history run has n_lags rows, a
+    # gripper_token run has 1. This is the check that would catch a mislabelled
+    # or hand-edited stamp, and it is also what proves the file is there to
+    # restore from if the staging copy has gone missing.
+    own = d / "assets_ego2g1"
+    if (own / "umi_stats.npz").exists():
+        o = _norm.load_umi(own)
+        want = rv.n_lags if mode == "history" else 1
+        if o.history_mean.shape[0] != want:
+            bad.append(f"{own}/umi_stats.npz has a {o.history_mean.shape[0]}-lag grid "
+                       f"but {exp} is supposed to be {mode} ({want} lags)")
+        else:
+            print(f"  OK  {exp} trained with a {o.history_mean.shape[0]}-lag "
+                  f"{o.rotation_repr} grid (its own copy, at {own})")
+    else:
+        print(f"  NOTE {own}/umi_stats.npz is absent — nothing to restore the "
+              "staging artifact from if it is missing too")
 
 if bad:
     print("\nPREFLIGHT FAILED:")
