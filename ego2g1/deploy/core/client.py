@@ -102,8 +102,35 @@ class PolicyClient:
             # How many rows are real. The rest is zero padding, and a zero vec9
             # is not a pose — the server must know where to stop.
             obs["n_prefix"] = int(len(prev_chunk) if n_prefix is None else n_prefix)
+        return self.infer_obs(obs)
+
+    def infer_obs(self, obs: dict) -> dict:
+        """Send an already-assembled observation dict.
+
+        The single-image `infer` above cannot express `umi_eef`'s request,
+        which carries TWO images (the acting wrist camera and the static
+        context view) under their own keys plus the absolute pose/gripper
+        history — see `ego2g1/deploy/modes/umi_eef.py`. Rather than grow
+        `infer` a second shape, modes with a different request build the dict
+        themselves and hand it here.
+
+        Every `observation/image*` value is resized on the wire exactly as
+        `infer` does it, for the same reason (full frames dominate latency
+        through a tunnel, and `d` is latency). Arrays are cast to float32;
+        bools are left alone, because the pad mask must arrive as a mask.
+        """
+        out_obs = {}
+        for key, value in obs.items():
+            if key.startswith("observation/image"):
+                out_obs[key] = self._prepare_image(value)
+            elif isinstance(value, np.ndarray) and value.dtype == np.bool_:
+                out_obs[key] = value
+            elif isinstance(value, np.ndarray):
+                out_obs[key] = np.asarray(value, dtype=np.float32)
+            else:
+                out_obs[key] = value
 
         t0 = time.monotonic()
-        out = self._ws.infer(obs)
+        out = self._ws.infer(out_obs)
         out["client_latency_s"] = time.monotonic() - t0
         return out

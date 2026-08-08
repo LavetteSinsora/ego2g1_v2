@@ -172,6 +172,8 @@ def main(
     perception_config: str | None = None,
     auto_download: bool = True,
     overwrite: bool = False,
+    shard: str | None = None,
+    reindex_only: bool = False,
     progress: bool = True,
 ):
     """Extract per-frame masks, boxes and orientations from raw episodes.
@@ -201,7 +203,27 @@ def main(
         roughly 50-150 MB per episode; the per-object depths are stored
         either way, and those are what the depth is FOR.
     max_frames: truncate each episode. For a quick shape-check, not a result.
+    shard: "k/n" — take every n-th episode starting at k, so n processes can
+        split one directory across n accelerators. Each shard loads the models
+        once and keeps them, which is the whole point: launching one process
+        per EPISODE would pay the ~60 s model load 50 times over. Pin the
+        device per shard from outside, e.g.
+        `CUDA_VISIBLE_DEVICES=$k python -m data_extraction.extract
+         --shard $k/16 ...`. Interleaved rather than contiguous so a shard
+        does not inherit a run of unusually long episodes.
     """
+    if reindex_only:
+        # Rebuild index.json from whatever is on disk. Deliberately before any
+        # model import, so it costs nothing and runs in a plain shell after a
+        # sharded run has finished.
+        out = Path(out_dir)
+        found = sorted(out.glob("*.h5"))
+        (out / "index.json").write_text(json.dumps(
+            {"schema": "ego2g1.data_extraction.index/1",
+             "files": [p.name for p in found]}, indent=2))
+        print(f"index   : {out / 'index.json'} ({len(found)} file(s))")
+        return
+
     import numpy as np  # noqa: F401  (imported early so a bad env fails fast)
 
     from data_extraction import orient_offline, stereo
@@ -224,6 +246,22 @@ def main(
     files = find_episodes(episodes)
     out_dir = Path(out_dir)
 
+    shard_label = ""
+    if shard:
+        try:
+            k_str, n_str = shard.split("/")
+            k, n_shards = int(k_str), int(n_str)
+        except ValueError:
+            raise SystemExit(f"--shard must look like 'k/n', got {shard!r}")
+        if not 0 <= k < n_shards:
+            raise SystemExit(f"--shard {shard}: need 0 <= k < n")
+        files = files[k::n_shards]
+        shard_label = f" [shard {k}/{n_shards}]"
+        if not files:
+            print(f"[shard {k}/{n_shards}] no episodes fall in this shard — "
+                  f"fewer episodes than shards. Nothing to do.")
+            return
+
     print("=" * 72)
     if dev.startswith("cuda"):
         pr = torch.cuda.get_device_properties(torch.cuda.current_device())
@@ -231,7 +269,7 @@ def main(
     else:
         print(f"device : {dev}  -- this will be extremely slow off the PPU box")
     print(f"torch  : {torch.__version__}")
-    print(f"episodes: {len(files)} file(s) from {episodes}")
+    print(f"episodes: {len(files)} file(s) from {episodes}{shard_label}")
     print(f"passes  : {list(pass_list)}")
     print("=" * 72)
 
@@ -336,8 +374,15 @@ def main(
         print(f"FAILED {len(failed)}:")
         for path, err in failed:
             print(f"  {path}: {err}")
-    index = out_dir / "index.json"
-    if written:
+    if written and shard:
+        # Every shard globs the SAME directory, so concurrent shards would race
+        # and whichever finishes first would publish an index missing the rest.
+        # One rebuild after `wait` is correct by construction.
+        print(f"index   : not written under --shard. After all shards finish:\n"
+              f"          python -m data_extraction.extract --episodes {episodes} "
+              f"--out-dir {out_dir} --reindex-only")
+    elif written:
+        index = out_dir / "index.json"
         index.write_text(json.dumps(
             {"schema": "ego2g1.data_extraction.index/1",
              "files": [p.name for p in sorted(out_dir.glob('*.h5'))]}, indent=2))

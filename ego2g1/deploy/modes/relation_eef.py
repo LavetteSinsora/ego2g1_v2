@@ -327,7 +327,8 @@ class RelationEEFMode(base.DeployMode):
         }
         return adapter
 
-    def build_observation(self, executor, camera, last_hands, prompt) -> dict:
+    def build_observation(self, executor, camera, last_hands, prompt,
+                          adapter=None) -> dict:
         """`RelationPolicyAdapter`'s `perception=` path needs BOTH camera
         eyes (for `StereoSGBMDepthSource`) plus the last-commanded gripper
         FRACTION per hand, not the proprio modes' single eye + (6,)-vector

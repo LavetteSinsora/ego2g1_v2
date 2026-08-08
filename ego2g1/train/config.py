@@ -52,7 +52,21 @@ class _CommonTrainFields:
 
     log_interval: int = 100 # interval of logging train loss, etc.
     save_interval: int = 1000 # interval of saving model checkpoint (for resuming training. new checkpoint saved, old deleted)
-    keep_period: int = 2500 # interval of storing not-deleted checkpoints (for offline diagnostic)
+    # Interval of storing not-deleted checkpoints (for offline diagnostic).
+    #
+    # MUST BE A MULTIPLE OF save_interval, or most of them silently vanish.
+    # orbax keeps a checkpoint permanently only if its step is divisible by
+    # keep_period; everything else is pruned by max_to_keep=1 (openpi
+    # checkpoints.initialize_checkpoint_dir) as soon as a newer one lands. The
+    # old 2500 did NOT divide save_interval=1000, so of the ten saves in a
+    # 10k-step run — 1000..9000 plus the final 9999 — only 5000 was divisible
+    # by 2500 and only 5000 and 9999 survived. 2000 keeps 2000/4000/6000/8000
+    # plus the final. (Step 0 is never saved: the loop guards on
+    # `step > start_step`.)
+    #
+    # In _HASH_EXCLUDE, so changing it does not move config_hash() and existing
+    # checkpoints keep resolving their norm stats.
+    keep_period: int = 2000
     # eval/probe cadence: the val minimum lands around step ~1k on this dataset,
     # so 250 resolves it instead of sampling it once. The best-val checkpoint
     # (checkpoints/<name>/<exp>/best/) is re-crowned at every eval.

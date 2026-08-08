@@ -42,6 +42,7 @@ import time
 
 import numpy as np
 
+from ...core import layout
 from .. import actions as _actions
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,31 @@ logger = logging.getLogger(__name__)
 
 class UnitreeExecutor:
     """ego2g1-facing wrapper over unitree_deploy's G1 arm + Brainco controller."""
+
+    # End-effector wire layouts, keyed by robot_type. The deploy layer's
+    # canonical row stays (26,) = 14 arm + 6+6 for EVERY robot (actions.py's
+    # ROBOT_DIM; strategies, clamp, session, safety and the recorder are all
+    # written against it and stay mode-blind). Only the translation to the
+    # vendor's own motor vector differs, and it differs HERE, in one place.
+    #
+    #   brainco  6 motors/hand, absolute [0, 1], 0=open 1=closed.
+    #   dex1     ONE motor/hand ("kLeftGripper"/"kRightGripper", a
+    #            z1_gripper-joint — unitree_deploy's robot_configs.py
+    #            dex1_default_factory). Its command is the gear ROTATION IN
+    #            RADIANS, which is the same quantity `UmiTrainConfig` trains on
+    #            and the model emits natively, so it is passed through
+    #            unchanged. Clipping it to [0, 1] like a Brainco fraction would
+    #            crush every command to 1.0 and the gripper would never open —
+    #            which is exactly why the limits live in this table instead of
+    #            being hard-coded in send().
+    _EE_LAYOUTS = {
+        "unitree_g1_brainco": {"per_hand": 6, "limits": (0.0, 1.0)},
+        # Range measured on red_block_on_yellow_block_umi: 1.20 (fully closed,
+        # a hard floor in the data) .. 5.40 (fully open). Widened slightly so a
+        # legitimate command at either extreme is not silently trimmed; this is
+        # a corruption guard, not a calibration.
+        "unitree_g1_dex1": {"per_hand": 1, "limits": (0.0, 6.0)},
+    }
 
     def __init__(self, *, fps: int = 30, network_interface: str | None = None,
                  robot_type: str = "unitree_g1_brainco",
@@ -71,6 +97,15 @@ class UnitreeExecutor:
         self.control_dt = 1.0 / self.fps
         self._iface = network_interface
 
+        try:
+            self._ee = self._EE_LAYOUTS[robot_type]
+        except KeyError:
+            raise ValueError(
+                f"robot_type={robot_type!r} has no end-effector wire layout here; "
+                f"known: {sorted(self._EE_LAYOUTS)}. Add one rather than letting "
+                "send() guess how the (26,) row maps onto the vendor's motors."
+            ) from None
+        self.robot_type = robot_type
         cfg = make_robot_config(robot_type)
         # We own the camera path (deploy/camera.py); drop unitree's image
         # client so there is no second consumer on the head image server.
@@ -85,6 +120,7 @@ class UnitreeExecutor:
         self._first_send = True
         self._lock = threading.Lock()
         self._last_q: np.ndarray | None = None
+        self._last_ee: dict | None = None   # filled by arm_q(), read by ee_q()
         self._last_q_change_t = time.monotonic()
         self._last_sent: tuple[float, np.ndarray] | None = None  # telemetry only
 
@@ -126,13 +162,41 @@ class UnitreeExecutor:
     def arm_q(self) -> np.ndarray:
         """(14,) measured arm joints, DualArmIK order (left 7, right 7)."""
         obs = self._robot.capture_observation()
-        q = np.asarray(obs["observation.state"].numpy()[: _actions.ARM_DOF],
-                       dtype=np.float64)
+        raw = np.asarray(obs["observation.state"].numpy(), dtype=np.float64)
+        # Cache the end-effector half from the SAME capture: the runner already
+        # calls arm_q() every tick, so ee_q() becomes free instead of doubling
+        # the number of round trips to the robot.
+        per_hand = self._ee["per_hand"]
+        self._last_ee = {h: float(raw[_actions.ARM_DOF + i * per_hand])
+                         for i, h in enumerate(layout.HANDS)}
+        q = raw[: _actions.ARM_DOF]
         with self._lock:
             if self._last_q is None or not np.array_equal(q, self._last_q):
                 self._last_q = q.copy()
                 self._last_q_change_t = time.monotonic()
         return q
+
+    def ee_q(self) -> dict:
+        """{hand: MEASURED end-effector value}. Dex1: the gripper's gear
+        rotation in radians. Cached from the last `arm_q()` capture.
+
+        NOT what the policy is fed. The training gripper signal saturates at a
+        hard 1.20 whenever the gripper is closed — measured across the whole
+        dataset, every one of the 117 episodes plateaus at bit-identical
+        1.2000, and 38% of all frames sit there. A real jaw cannot close to its
+        limit around a solid block, so that column is a commanded/clamped
+        value, not a physical position. Feeding the true encoder at deploy
+        would therefore read ~the block's width while gripping — a value the
+        policy has never seen in that phase.
+
+        So this is used for two things only: seeding the very first history
+        sample of a rollout, and the command-vs-measured deviation, which is
+        the honest "did the grasp actually take" signal the policy's own
+        gripper channel cannot provide.
+        """
+        if self._last_ee is None:
+            self.arm_q()
+        return dict(self._last_ee)
 
     def state_age(self) -> float:
         """Seconds since the measured arm last changed. A live 500 Hz lowstate
@@ -161,15 +225,37 @@ class UnitreeExecutor:
         if row.shape != (_actions.ROBOT_DIM,):
             raise ValueError(f"expected ({_actions.ROBOT_DIM},), got {row.shape}")
         row = row.copy()
-        row[_actions.ARM_DOF:] = np.clip(row[_actions.ARM_DOF:], 0.0, 1.0)
+        lo, hi = self._ee["limits"]
+        row[_actions.ARM_DOF:] = np.clip(row[_actions.ARM_DOF:], lo, hi)
         if t_target is None:
             t_target = time.monotonic() + 2 * self.control_dt
-        self._robot.send_action(self._torch.from_numpy(row.astype(np.float32)),
+        self._robot.send_action(self._torch.from_numpy(self._wire_row(row)),
                                 t_target)
         # `row` is our private copy and never mutated again: a plain reference
         # swap is enough for the dashboard's pull-side read. No lock, no copy.
         self._last_sent = (float(t_target), row)
         self._first_send = False
+
+    def _wire_row(self, row) -> np.ndarray:
+        """Canonical (26,) row -> the vendor's motor vector for this robot.
+
+        Brainco is the identity (its 6+6 block IS the wire layout, so the
+        existing path is bit-identical). Dex1 takes ONE motor per hand, and by
+        convention that value lives in slot 0 of each hand's block; the other
+        five slots are unused padding kept so the deploy layer's row width is
+        the same for every robot.
+        """
+        per_hand = self._ee["per_hand"]
+        if per_hand == _actions.HAND_DOF:
+            return row.astype(np.float32)
+        out = np.empty(_actions.ARM_DOF + per_hand * len(layout.HANDS),
+                       dtype=np.float32)
+        out[:_actions.ARM_DOF] = row[_actions.ARM]
+        for i, h in enumerate(layout.HANDS):
+            block = row[_actions.HAND[h]]
+            base = _actions.ARM_DOF + i * per_hand
+            out[base:base + per_hand] = block[:per_hand]
+        return out
 
     def hold(self) -> None:
         """Re-send the measured pose (a safe no-op waypoint)."""
@@ -267,6 +353,14 @@ class MockExecutor:
 
     def arm_q(self) -> np.ndarray:
         return self._q.copy()
+
+    def ee_q(self) -> dict:
+        """Mirror of UnitreeExecutor.ee_q: the last-sent end-effector value per
+        hand (slot 0 of each hand block), or 0.0 before the first send."""
+        if not self.sent:
+            return {h: 0.0 for h in layout.HANDS}
+        row = self.sent[-1][1]
+        return {h: float(row[_actions.HAND[h]][0]) for h in layout.HANDS}
 
     def state_age(self) -> float:
         return 0.0

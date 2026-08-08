@@ -55,7 +55,12 @@ class _EchoMode(_modes.DeployMode):
     def build_adapter(self, client, args, fps):   # pragma: no cover - unused
         raise NotImplementedError
 
-    def build_observation(self, executor, camera, last_hands, prompt):
+    def build_observation(self, executor, camera, last_hands, prompt,
+                          adapter=None):
+        # `adapter` is part of the DeployMode contract (base.py): it is the
+        # only hook called at CONTROL rate, so a mode that accumulates
+        # per-tick state (umi_eef's pose history) needs it here. Ignored by
+        # every mode that does not.
         return {"arm_q": executor.arm_q(), "efforts": dict(last_hands),
                 "image": None, "prompt": prompt}
 

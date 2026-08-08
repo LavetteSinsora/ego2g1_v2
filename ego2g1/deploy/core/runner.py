@@ -137,7 +137,7 @@ class DeployRunner:
         stereo pair + scalar gripper fractions."""
         return self.mode.build_observation(
             self.executor, self.camera, self.last_hands,
-            getattr(self.adapter, "prompt", ""))
+            getattr(self.adapter, "prompt", ""), adapter=self.adapter)
 
     # --- the loop ---------------------------------------------------------------
 
@@ -417,7 +417,7 @@ class Args:
     rtc_execute_horizon: int | None = None
     # --- action mode: "auto" reads the checkpoint's control_mode from the
     # server handshake; override only to test a mismatched pairing on purpose.
-    action_mode: str = "auto"          # auto | joint | relative_eef | relation_eef
+    action_mode: str = "auto"          # auto | joint | relative_eef | relation_eef | umi_eef
     ik_iters: int = 25
     posture_cost: float = 0.05         # the measured smoothness knob
     collision_min_dist: float = 0.005
@@ -457,6 +457,30 @@ class Args:
         default_factory=lambda: __import__(
             "ego2g1.deploy.camera", fromlist=["DEFAULT_HOST"]).DEFAULT_HOST)
     eye: str = "left"
+    # --- umi_eef-only ---------------------------------------------------------
+    # How the arm the policy does NOT drive is held. It carries the context
+    # camera, so its stability is a model input, not a convenience.
+    #   "latch"  freeze at the pose measured when the rollout starts. The view
+    #            cannot drift — what the server's base_0_rgb augmentation
+    #            assumes. USE THIS FOR EVALUATION.
+    #   "follow" re-read that arm every chunk and command it back to where it
+    #            currently is, so it can be pushed into place by hand and
+    #            stays. The positioning workflow; the view is only as stable as
+    #            the room is.
+    idle_hold: str = "latch"
+    # Wrist cameras. Left EMPTY for a normal run: both come off the robot's own
+    # image_server (--camera-host), the same client the head camera uses —
+    # ImageClient publishes cam_left_wrist/cam_right_wrist alongside the head
+    # pair. Only a rig whose wrist cameras live elsewhere needs these, and then
+    # BOTH are required (pairing one custom device with one image_server one is
+    # not recoverable from the frames). URIs: "v4l2:<index>" |
+    # "zmq:<host>[:<eye>]" | "static".
+    acting_camera: str | None = dataclasses.field(
+        default_factory=lambda: os.environ.get("EGO2G1_ACTING_CAMERA"))
+    context_camera: str | None = dataclasses.field(
+        default_factory=lambda: os.environ.get("EGO2G1_CONTEXT_CAMERA"))
+    # SSH-start image_server on the camera host if it is not already up
+    auto_start_camera_server: bool = False
     # --- observability ---
     dashboard: bool = False            # live web monitor (deploy/dashboard.py)
     dashboard_port: int = 8080
@@ -494,16 +518,25 @@ def main(args: Args) -> None:
                 client.control_mode)
 
     # --- executor + camera
+    # The mode may own its camera (umi_eef needs TWO independent ones, not a
+    # head unit's two eyes); None means "the runner's default single camera".
+    cam = mode.build_camera(args)
     if args.dry_run:
         from ..camera import StaticCamera
         from .executor import MockExecutor
-        executor, cam = MockExecutor(fps=fps), StaticCamera()
+        executor = MockExecutor(fps=fps)
+        cam = cam if cam is not None else StaticCamera()
     else:
         from ..camera import HeadCamera
         from .executor import UnitreeExecutor
+        # robot_type comes from the MODE: it selects the end-effector wire
+        # layout and command limits (Brainco's 6 motors/hand in [0,1] vs Dex1's
+        # single motor in radians), and getting it wrong silently clips or
+        # misroutes every gripper command.
         executor = UnitreeExecutor(fps=fps, network_interface=args.network_interface,
+                                   robot_type=mode.robot_type,
                                    max_pos_speed=args.max_pos_speed)
-        cam = HeadCamera(host=args.camera_host, eye=args.eye)
+        cam = cam if cam is not None else HeadCamera(host=args.camera_host, eye=args.eye)
     cam.connect()
 
     # --- recorder: always a RecorderSwitch, so the dashboard's Record button
@@ -554,7 +587,8 @@ def main(args: Args) -> None:
             # the probe is just the mode's own observation, built from the
             # rollout-start hand state — one definition, no separate builder
             probe = mode.build_observation(
-                executor, cam, mode.initial_hand_state(), args.prompt)
+                executor, cam, mode.initial_hand_state(), args.prompt,
+                adapter=adapter)
             report = _latency.startup_self_check(
                 args.mode, lambda: adapter.infer(dict(probe)),
                 fps=fps, horizon=horizon, inference_hz=args.inference_hz,

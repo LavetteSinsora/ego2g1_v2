@@ -29,6 +29,11 @@ class DeployMode:
     name: str = "?"
     supports_rtc: bool = False
     supports_reset_to_episode: bool = False
+    # The unitree_deploy robot config this family's hardware needs. Selects the
+    # executor's end-effector wire layout and command limits — Brainco's 6
+    # motors per hand in [0,1] vs Dex1's single motor in radians. Wrong value =
+    # a gripper command silently clipped or written to the wrong motor.
+    robot_type: str = "unitree_g1_brainco"
 
     # --- wiring (runner.main) ------------------------------------------------
 
@@ -38,13 +43,25 @@ class DeployMode:
         duck-typed stub carrying the fields this mode reads)."""
         raise NotImplementedError
 
+    def build_camera(self, args):
+        """The camera object this family consumes, or None to let the runner
+        build its default single head camera. `umi_eef` overrides it: that
+        family needs TWO independent cameras, not one head unit's two eyes."""
+        return None
+
     # --- the observation (runner loop step 1, and the startup probe) ---------
 
     def build_observation(self, executor, camera, last_hands: dict,
-                          prompt: str) -> dict:
+                          prompt: str, adapter=None) -> dict:
         """The request dict `adapter.infer` consumes. Also used for the
         startup latency probe (with `initial_hand_state()` as last_hands) —
-        one definition, no separate probe builder."""
+        one definition, no separate probe builder.
+
+        `adapter` is passed so a mode can accumulate CONTROL-RATE state here:
+        this is the only hook the runner calls every tick, and `adapter.infer`
+        runs at `inference_hz`. `umi_eef` uses it to fill its pose-history ring
+        buffer. Optional, so the modes that need no per-tick state are
+        unaffected."""
         raise NotImplementedError
 
     # --- hand-command bookkeeping (runner loop step 3) ------------------------
@@ -88,7 +105,8 @@ class ProprioModeBase(DeployMode):
     """joint / relative_eef: single-eye observation, (6,)-vector hand
     commands read straight off the executed row."""
 
-    def build_observation(self, executor, camera, last_hands, prompt) -> dict:
+    def build_observation(self, executor, camera, last_hands, prompt,
+                          adapter=None) -> dict:
         return {"arm_q": executor.arm_q(),
                 "hand_cmds": {h: np.asarray(last_hands[h]).copy()
                               for h in layout.HANDS},

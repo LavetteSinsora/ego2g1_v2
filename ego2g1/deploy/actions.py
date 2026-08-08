@@ -48,7 +48,7 @@ the seam overlap; that is a bounded extra smoothing lag, not a discontinuity.
 
 import numpy as np
 
-from ..core import layout, relation_layout
+from ..core import layout, relation_layout, umi_layout
 
 # --- executor row layout ------------------------------------------------------
 
@@ -105,6 +105,35 @@ def sanity_check_relation_action(action) -> bool:
             return False
         if abs(float(a[relation_layout.GRIP[h]][0])) > 3.0:
             return False
+    return True
+
+
+# Widest plausible Dex1 gripper command, radians of gear rotation. The training
+# data spans 1.20 (fully closed) .. 5.40 (fully open); this is a corruption
+# guard with generous slack, NOT a calibration — the model's value is executed
+# faithfully within it, never rescaled.
+UMI_GRIP_LIMIT_RAD = 8.0
+
+
+def sanity_check_umi_action(action) -> bool:
+    """Guard on a (7,) umi_eef row before it reaches the IK.
+
+    Same shape of check as the relation guard: translation delta <= 1.5 m,
+    rotvec magnitude <= 2*pi (any legitimate Rodrigues vector is <= pi; 2*pi
+    leaves slack for an unwrapped encoding, beyond that it is garbage). The
+    gripper is CONTINUOUS here and in radians, not a {-1,+1} binary, so it is
+    bounded by the physical travel rather than by a convention.
+    """
+    a = np.asarray(action)
+    if a.shape != (umi_layout.ACTION_DIM,) or not np.all(np.isfinite(a)):
+        return False
+    eef = a[umi_layout.EEF6]
+    if np.linalg.norm(eef[:3]) > 1.5:
+        return False
+    if np.linalg.norm(eef[3:]) > 2.0 * np.pi:
+        return False
+    if abs(float(a[umi_layout.GRIP][0])) > UMI_GRIP_LIMIT_RAD:
+        return False
     return True
 
 

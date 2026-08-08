@@ -155,25 +155,62 @@ class Dashboard:
 
     def encode_frame(self):
         """Latest camera frame as JPEG bytes, or None. Uses the same public
-        `read()` the loop already calls (returns a copy), then cv2 to encode."""
+        `read()` the loop already calls (returns a copy), then cv2 to encode.
+
+        A camera exposing `read_pair()` (umi_eef's `CameraPair`) is rendered as
+        both views SIDE BY SIDE, captioned, rather than just the acting one.
+        The captions are not decoration: this mode's two cameras go to
+        different model input slots and swapping them produces a rollout that
+        looks plausible and is wrong, so which-is-which has to be readable at a
+        glance on the page.
+        """
         cam = getattr(self.loop, "camera", None) or getattr(self.loop, "cam", None)
         if cam is None:
-            return None
-        frame = cam.read()
-        if frame is None:
             return None
         try:
             import cv2
         except Exception:
             return None
-        img = np.ascontiguousarray(frame)
-        h, w = img.shape[:2]
-        if self.frame_width and w > self.frame_width:
-            scale = self.frame_width / float(w)
-            img = cv2.resize(img, (self.frame_width, max(1, int(round(h * scale)))),
-                             interpolation=cv2.INTER_AREA)
-        bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)   # camera hands out RGB
-        ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+
+        pair = getattr(cam, "read_pair", None)
+        frames = pair() if pair is not None else (cam.read(),)
+        labels = getattr(cam, "labels", ()) if pair is not None else ()
+        if any(f is None for f in frames):
+            return None
+
+        tiles = []
+        for i, frame in enumerate(frames):
+            img = np.ascontiguousarray(frame)
+            h, w = img.shape[:2]
+            if self.frame_width and w > self.frame_width:
+                scale = self.frame_width / float(w)
+                img = cv2.resize(img, (self.frame_width, max(1, int(round(h * scale)))),
+                                 interpolation=cv2.INTER_AREA)
+            bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)   # camera hands out RGB
+            if i < len(labels):
+                bgr = bgr.copy()
+                text = str(labels[i])
+                cv2.rectangle(bgr, (0, 0), (bgr.shape[1], 18), (0, 0, 0), -1)
+                cv2.putText(bgr, text, (4, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (255, 255, 255), 1, cv2.LINE_AA)
+            tiles.append(bgr)
+
+        if len(tiles) > 1:
+            # pad to a common height before hstack — the two cameras need not
+            # be the same model or resolution
+            th = max(t.shape[0] for t in tiles)
+            padded = []
+            for t in tiles:
+                if t.shape[0] != th:
+                    pad = np.zeros((th - t.shape[0], t.shape[1], 3), t.dtype)
+                    t = np.vstack([t, pad])
+                padded.append(t)
+                padded.append(np.zeros((th, 2, 3), t.dtype))   # divider
+            out = np.hstack(padded[:-1])
+        else:
+            out = tiles[0]
+
+        ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return buf.tobytes() if ok else None
 
     def encode_perception_frame(self):
@@ -368,7 +405,10 @@ h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.02em}
 .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .badge{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
   padding:3px 9px;border-radius:999px;border:1px solid var(--hair);color:var(--ink2)}
-#cam{display:block;width:100%;max-width:360px;border-radius:8px;background:var(--surface2);
+/* 728px = two 360px tiles + the 2px divider, so umi_eef's side-by-side pair
+   renders at full size; a single-camera mode is still capped at its own
+   360px width by the source image and never stretches. */
+#cam{display:block;width:auto;max-width:min(728px,100%);border-radius:8px;background:var(--surface2);
   aspect-ratio:3/2;object-fit:cover}
 .camwrap{flex:0 0 auto}
 .status{flex:1 1 240px;min-width:240px}
@@ -502,8 +542,36 @@ canvas{display:block;width:100%}
       </div>
     </div>
   </div>
+  <div id="umiCard" style="display:none">
+    <div class="row" style="margin-top:14px">
+      <div class="card status"><div class="title">state history &nbsp;·&nbsp; injected prompt tokens</div>
+        <div class="grid4">
+          <div class="stat"><div class="n" id="u-hist">—</div><div class="l">lags sent / total</div></div>
+          <div class="stat"><div class="n" id="u-lags">—</div><div class="l">lag ticks</div></div>
+        </div>
+        <div class="sub" style="margin-top:6px">short = the loop is dropping ticks past the
+          buffer tolerance; expected only just after Start</div>
+      </div>
+      <div class="card status"><div class="title">gripper &nbsp;·&nbsp; commanded vs measured</div>
+        <div class="grid4">
+          <div class="stat"><div class="n" id="u-gcmd">—</div><div class="l">commanded (rad)</div></div>
+          <div class="stat"><div class="n" id="u-gmeas">—</div><div class="l">measured (rad)</div></div>
+          <div class="stat"><div class="n" id="u-gdev">—</div><div class="l">gap</div></div>
+          <div class="stat"><div class="n" id="u-gdevw">—</div><div class="l">worst gap</div></div>
+        </div>
+        <div class="sub" style="margin-top:6px">a gap while closing means the jaws met something;
+          a gap near zero through a grasp means they closed on nothing</div>
+      </div>
+      <div class="card status"><div class="title">idle arm</div>
+        <div class="grid4">
+          <div class="stat"><div class="n" id="u-idle">—</div><div class="l">hold latched</div></div>
+          <div class="stat"><div class="n" id="u-acting">—</div><div class="l">acting arm</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="sub" id="relationNA" style="margin-top:14px">
-    relation_eef perception: n/a (this run is not in relation_eef mode)</div>
+    per-mode panel: n/a (this run is not in relation_eef or umi_eef mode)</div>
 
   <div class="card"><div class="title">loop health</div>
     <div class="grid4">
@@ -659,9 +727,13 @@ function renderRelation(t){
   const rel=t.relation;
   if(!rel){
     $("relationCard").style.display="none";
+    $("umiCard").style.display="none";
     $("relationNA").style.display="";
     return;
   }
+  // Panels from recordings written before `kind` existed are all relation_eef.
+  if(rel.kind==="umi"){ renderUmi(rel); return; }
+  $("umiCard").style.display="none";
   $("relationCard").style.display="";
   $("relationNA").style.display="none";
   refreshPercep();
@@ -688,6 +760,27 @@ function renderRelation(t){
   }
 
   drawLatchTimeline(rel.events, t.now);
+}
+
+function renderUmi(u){
+  $("relationCard").style.display="none";
+  $("relationNA").style.display="none";
+  $("umiCard").style.display="";
+  const n=u.n_lags||0, k=u.history_len||0;
+  const el=$("u-hist");
+  el.textContent=k+" / "+n;
+  // short history is normal for the first half-second after Start, and a
+  // problem after that — colour it rather than making the operator watch a number
+  el.style.color = (k>=n) ? css('--good') : (k>0 ? css('--warn') : css('--crit'));
+  $("u-lags").textContent=(u.lag_ticks||[]).join(" ");
+  $("u-gcmd").textContent = u.grip_cmd!=null ? fmt(u.grip_cmd,2) : "—";
+  $("u-gmeas").textContent = u.grip_measured!=null ? fmt(u.grip_measured,2) : "—";
+  $("u-gdev").textContent = u.grip_dev!=null ? fmt(u.grip_dev,2) : "—";
+  $("u-gdevw").textContent = u.grip_dev_worst!=null ? fmt(u.grip_dev_worst,2) : "—";
+  const idle=$("u-idle");
+  idle.textContent = u.idle_latched ? ("held · "+u.idle_hand) : "NOT LATCHED";
+  idle.style.color = u.idle_latched ? css('--good') : css('--crit');
+  $("u-acting").textContent = u.acting_hand || "—";
 }
 
 let scrubDragging=false;

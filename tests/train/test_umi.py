@@ -404,6 +404,23 @@ def test_feature_flags_are_all_declared_supported():
     assert required <= _stamp.SUPPORTED_FEATURES
 
 
+def test_deploy_layout_agrees_with_the_training_config():
+    """`ego2g1.core.umi_layout` is what the DEPLOY side slices chunks with. It
+    must be derived from the same numbers the config trains on, not eyeballed —
+    a disagreement here decodes the gripper as a rotation component and still
+    produces a plausible-looking pose."""
+    from ego2g1.core import umi_layout
+
+    c = _config.UmiTrainConfig()
+    assert umi_layout.ACTION_DIM == c.action_dim_actual
+    assert umi_layout.HISTORY_DIM == c.history_dim
+    assert umi_layout.POSE_DIM == _ut.POSE_DIM
+    assert list(range(umi_layout.ACTION_DIM))[umi_layout.GRIP] == list(c.gripper_dims)
+    assert umi_layout.ACTING_HAND == c.hand
+    assert umi_layout.IDLE_HAND != c.hand
+    assert umi_layout.default_lag_ticks() == c.lag_ticks
+
+
 def test_relation_config_is_untouched_by_inject_ordered():
     """The UMI config must not have changed the relational one's behaviour."""
     mc = _config.EgoRelationTrainConfig().model_config()

@@ -58,6 +58,8 @@ class EEFChunksBase:
         self._smoother = {h: OneEuroSE3(**kw) for h in self.hands}
         self.last_tracking_error: float = 0.0
         self.last_slot_errors = np.zeros(0)
+        # {hand: (4,4)} anchor of the most recent convert() — see convert()
+        self.last_anchor: dict = {}
         # per-slot flange target POSITIONS (pelvis frame, post-One-Euro — the
         # pose the IK is actually judged against), for the recorder / the
         # MuJoCo replay's "where the policy wanted the hand" marker
@@ -73,6 +75,18 @@ class EEFChunksBase:
 
     def _row_ok(self, row: np.ndarray) -> bool:
         raise NotImplementedError
+
+    def _post_solve(self, q_arm: np.ndarray) -> np.ndarray:
+        """Last word on the (14,) IK solution before it becomes a row.
+
+        Identity by default, so joint/relative_eef/relation_eef are bit-
+        identical. `umi_eef` overrides it to PIN the idle arm's 7 joints to
+        their latched hold values: that arm carries the context camera, and
+        the policy's whole workspace view depends on it not wandering. The QP
+        already targets the latched pose, but a redundant 7-DOF arm has a null
+        space and the posture cost only penalizes wander, it does not forbid
+        it."""
+        return q_arm
 
     # --- the shared pipeline ---------------------------------------------------
 
@@ -92,6 +106,11 @@ class EEFChunksBase:
                     "corrupted chunk; refusing to make it a pose")
 
         anchor = self.kin.flange_poses(arm_q14)
+        # Surfaced for subclasses whose delta is not purely a function of the
+        # row (umi_eef's idle arm holds an absolute LATCHED pose, so its delta
+        # is inv(anchor) @ T_hold) and for post-mortem diagnostics. Set before
+        # the loop, so `_delta` can read it.
+        self.last_anchor = anchor
         self.kin.ground(arm_q14)
 
         out = np.empty((len(actions), _actions.ROBOT_DIM), dtype=np.float64)
@@ -103,7 +122,7 @@ class EEFChunksBase:
                 T = anchor[h] @ self._delta(row, h)
                 targets[h] = self._smoother[h].filter(T, self.dt)
                 tgt_pos[h][k] = targets[h][:3, 3]
-            out[k, _actions.ARM] = self.kin.solve(targets)
+            out[k, _actions.ARM] = self._post_solve(self.kin.solve(targets))
             slot_err[k] = max(self.kin.tracking_error(targets).values())
             for h in self.hands:
                 out[k, _actions.HAND[h]] = self._hand_block(row, h)

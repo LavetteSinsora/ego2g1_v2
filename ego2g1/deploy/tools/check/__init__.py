@@ -24,6 +24,8 @@ the vendored-executor architecture, then split one-module-per-rung-family
                                                # 5b. interactively close a hand
                                                #     around a real object, for
                                                #     BRAINCO_CLOSED_POSE       [robot]
+    python -m ego2g1.deploy.check dex1        # 5c. Dex1 obs/cmd layout + units,
+                                               #     READ-ONLY (umi_eef)       [robot]
     python -m ego2g1.deploy.replay_dataset --dataset ...        # 6. stored JOINTS  [robot]
     python -m ego2g1.deploy.replay_dataset --dataset ... --from-eef  # 6b. eef->IK  [robot]
     python -m ego2g1.deploy.check replay-actions --dataset ...  # 7. ACTION labels  [robot]
@@ -53,8 +55,15 @@ OneEuroSE3, mink IK, JointFilter, clamp — and proves the TRANSFORMS. A frame
 or anchor bug leaves 6 perfect and shows up only in 7; run 6 first so 7 is
 interpretable.
 
+Rung 5c is `UmiTrainConfig`-specific and is the gate on the Dex1 hardware
+assumptions `umi_eef` was written against (observation width and ordering,
+the command vector `_wire_row` builds, and whether the gripper encoder really
+reports the 1.20..5.40 radian range the training data stores). It publishes
+NOTHING and does not even connect the ego2g1 executor, so unlike the other
+[robot] rungs it cannot move the arm. Run it before any umi_eef rollout.
+
 Rung modules: dds (1), kin (2/3/3b), camera (4/4b), calib_capture (4c),
-hands (5/5b), replay_actions (7), latency (8). Everything a rung needs is
+hands (5/5b), dex1 (5c), replay_actions (7), latency (8). Everything a rung needs is
 importable from this package directly (the old flat `ego2g1.deploy.check`
 import path keeps working via the top-level shim).
 """
@@ -62,6 +71,7 @@ import path keeps working via the top-level shim).
 from .calib_capture import handeye_capture  # noqa: F401
 from .camera import _next_pair_index, camera, stereo_capture  # noqa: F401
 from .dds import listen  # noqa: F401
+from .dex1 import dex1  # noqa: F401
 from .hands import hand_jog, hand_sweep  # noqa: F401
 from .kin import fk, ik, tcp_orientation  # noqa: F401
 from .latency import latency  # noqa: F401
@@ -78,6 +88,7 @@ RUNGS = {
     "handeye-capture": handeye_capture,
     "hand-sweep": hand_sweep,
     "hand-jog": hand_jog,
+    "dex1": dex1,
     "replay-actions": replay_actions,
     "latency": latency,
 }

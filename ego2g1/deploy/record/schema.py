@@ -76,6 +76,19 @@ EVENT_KINDS: dict[str, EventSpec] = {
     "tracking": EventSpec(
         "per chunk (EEF modes): worst IK tracking error, metres",
         ("worst_m",)),
+    "umi_history": EventSpec(
+        "per tick (umi_eef): how many state-history lags the policy actually "
+        "received. Chronically short means the loop is dropping ticks past the "
+        "buffer's nearest-sample tolerance — invisible in the loss, the "
+        "tracking error and the video, so it is recorded explicitly",
+        ("step", "history_len", "n_lags")),
+    "umi_gripper": EventSpec(
+        "per tick (umi_eef): the gripper value COMMANDED by the policy and the "
+        "one MEASURED at the encoder. The policy is fed the command (its "
+        "training signal saturates when closed), so this gap is the only "
+        "grasp-success evidence there is — closed on the block and closed on "
+        "nothing look identical to the policy",
+        ("step", "commanded", "measured")),
     "worker_error": EventSpec(
         "the async inference worker died",
         ("error",)),

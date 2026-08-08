@@ -76,7 +76,10 @@ class TelemetrySnapshot:
     arm_q: list | None = None
     state_age: float | None = None
     estopped: bool = False
-    relation: dict | None = None    # relation_eef panel (relation_panel()) or None
+    # The per-mode panel (DeployMode.telemetry_extras) or None. Carries a
+    # "kind" discriminator so the page can render the right card; panels from
+    # recordings written before that field existed are all relation_eef.
+    relation: dict | None = None
     replay: dict | None = None      # replay_dashboard's scrub state or None (live)
 
     def to_json(self) -> dict:
@@ -128,5 +131,5 @@ def relation_panel(snapshot: dict | None, events: list | None) -> dict | None:
             "reason": h.get("reason"),
         })
 
-    return {"objects": objects, "hands": hand_states,
+    return {"kind": "relation", "objects": objects, "hands": hand_states,
             "events": list(events or [])}
