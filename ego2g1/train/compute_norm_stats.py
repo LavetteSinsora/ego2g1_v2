@@ -244,11 +244,12 @@ def main_umi(config: _config.UmiTrainConfig):
         config.hand, config.n_lags, max(config.lag_ticks),
     )
 
-    print(f"Building relative action chunks from parquet (H={h}, D={d_real}) ...")
-    actions = _ds.umi_raw_action_chunks(config, h, split="train")        # (N, H, 7)
+    print(f"Building relative action chunks from parquet "
+          f"(H={h}, D={d_real}, rotation_repr={config.rotation_repr}) ...")
+    actions = _ds.umi_raw_action_chunks(config, h, split="train")        # (N, H, D)
     # full_only: lag j's stats must come from anchors where lag j is REAL, not
     # from LeRobot's clamped duplicates of the episode's first frame
-    history = _ds.umi_raw_history(config, split="train", full_only=True)  # (M, n_lags, 7)
+    history = _ds.umi_raw_history(config, split="train", full_only=True)  # (M, n_lags, D)
     print(f"  actions {actions.shape}  history {history.shape}")
 
     # Exact percentiles: float64 at this size is well under a GB, so there is no
@@ -282,6 +283,7 @@ def main_umi(config: _config.UmiTrainConfig):
         gripper_dims=grip,
         gripper_q01=g01,
         gripper_q99=g99,
+        rotation_repr=config.rotation_repr,
         provenance={
             "extraction_config_hash": meta["config_hash"],
             "ego2g1_config_hash": config.config_hash(),
@@ -289,6 +291,7 @@ def main_umi(config: _config.UmiTrainConfig):
             "num_history_blocks": int(history.shape[0]),
             "val_source_episodes": list(config.val_source_episodes),
             "action_norm_scheme": config.action_norm_scheme,
+            "rotation_repr": config.rotation_repr,
             "lag_ticks": list(config.lag_ticks),
             "model_space_variance": model_space_variance.tolist(),
             "gripper_raw_range": [float(actions[..., grip[0]].min()),
@@ -300,15 +303,21 @@ def main_umi(config: _config.UmiTrainConfig):
     if problems:
         raise SystemExit("Stats sanity check FAILED:\n  " + "\n  ".join(problems))
 
-    output_dir = config.assets_dirs / config.repo_id
+    # Keyed by rotation_repr (UmiTrainConfig.stats_dir), so computing one
+    # representation's stats cannot overwrite the other's — which matters
+    # concretely, because a resumed rotvec run reloads its artifact from here.
+    output_dir = config.stats_dir
     print(f"Writing {_norm.UMI_FILENAME} to: {output_dir}")
     _norm.save_umi(output_dir, stats)
 
     # ------------------------------------------------------------------ report
     from ego2g1.train import data_config as _dc
 
-    w = _dc.loss_dim_weights(stats, d_real, grip, config.w_gripper)
-    labels = ["dx", "dy", "dz", "rx", "ry", "rz", "grip"]
+    w = _dc.loss_dim_weights(stats, d_real, grip, config.w_gripper,
+                             rot_dims=config.rot_dims)
+    rot_labels = (["rx", "ry", "rz"] if config.rotation_repr == "rotvec"
+                  else ["R00", "R10", "R20", "R01", "R11", "R21"])
+    labels = ["dx", "dy", "dz", *rot_labels, "grip"]
     with np.printoptions(precision=4, suppress=True, linewidth=200):
         print("\nmodel-space std per slot (target: uniform; a pooled scheme would leave")
         print("slot 0 at ~1/30 unit scale on this dataset):")
@@ -336,10 +345,18 @@ def main_umi(config: _config.UmiTrainConfig):
     print(f"\nloss_dim_weights (w_gripper={config.w_gripper}, mean 1):")
     for name, wi, v in zip(labels, w, model_space_variance, strict=True):
         print(f"  {name:>5s}  Var(x1)={v:7.4f}  Var(u)={1 + v:7.4f}  w={wi:7.4f}")
+    # The three BLOCK shares, which are what must match across rotation_repr for
+    # the A/B to be about the encoding rather than about the reweighting. Intent
+    # is stated in block units (translation 3, rotation 3, gripper w_gripper),
+    # NOT in dim counts — that is exactly the distinction loss_dim_weights'
+    # rotation stage exists to preserve.
     tot = sum(wi * (1 + v) for wi, v in zip(w, model_space_variance, strict=True))
-    gshare = sum(w[d] * (1 + model_space_variance[d]) for d in grip) / tot
-    print(f"  -> gripper share of weighted MSE: {gshare * 100:.2f}% "
-          f"(intent {config.w_gripper / (6 + config.w_gripper) * 100:.2f}%)")
+    share = lambda dims: sum(w[d] * (1 + model_space_variance[d]) for d in dims) / tot
+    denom = 3 + 3 + config.w_gripper
+    print(f"  -> block shares of weighted MSE: "
+          f"translation {share(range(3)) * 100:.2f}% (intent {3 / denom * 100:.2f}%), "
+          f"rotation {share(config.rot_dims) * 100:.2f}% (intent {3 / denom * 100:.2f}%), "
+          f"gripper {share(grip) * 100:.2f}% (intent {config.w_gripper / denom * 100:.2f}%)")
 
 
 if __name__ == "__main__":

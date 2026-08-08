@@ -224,11 +224,37 @@ def check_relation_stats_sanity(stats: RelationNormStats, max_abs_norm: float = 
 
 UMI_FILENAME = "umi_stats.npz"
 
-# Lag 0's pose dims are the anchor expressed in its own frame, i.e. exactly
-# zero for every sample. Structurally constant, not a data bug -- the ONE
-# exemption `check_umi_stats_sanity` grants, so that any other zero-variance
-# dim still fails loud.
+# Lag 0's pose dims are the anchor expressed in its own frame, i.e. the IDENTITY
+# pose for every sample. Structurally constant, not a data bug -- the ONE
+# exemption `check_umi_stats_sanity` grants, so that any other zero-variance dim
+# still fails loud.
+#
+# CONSTANT but not necessarily ZERO: under rotation_repr="rot6d" the identity
+# rotation encodes as [1, 0, 0, 0, 1, 0], so the mean of those dims is 1 on two
+# of them. `lag_zero_pose_is_offset` compares against the right constant per
+# representation rather than assuming zero, and this tuple is the rotvec one.
 LAG0_POSE_DIMS = (0, 1, 2, 3, 4, 5)
+
+# The encoding of the identity rotation, per rotation_repr. Duplicated here as
+# three numbers rather than imported from `ego2g1.train.umi_transforms`, which
+# pulls in openpi: `norm` is the artifact layer and is imported by the deploy
+# side too. `tests/train/test_umi.py` asserts the two agree.
+_IDENTITY_ROTATION = {
+    "rotvec": (0.0, 0.0, 0.0),
+    "rot6d": (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+}
+
+
+def lag0_pose_dims(rotation_repr: str) -> tuple[int, ...]:
+    """Which history dims are structurally constant at lag 0: translation +
+    rotation, i.e. everything but the gripper."""
+    return tuple(range(3 + len(_IDENTITY_ROTATION[rotation_repr])))
+
+
+def identity_pose_row(rotation_repr: str) -> np.ndarray:
+    """The lag-0 pose row every sample carries: zero translation + identity
+    rotation, in the given encoding. (3 + rot_dim,)."""
+    return np.array((0.0, 0.0, 0.0) + _IDENTITY_ROTATION[rotation_repr], dtype=np.float64)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -249,12 +275,19 @@ class UmiNormStats:
         for why this deliberately inverts the relational config's rule.
     """
 
-    action_q01: np.ndarray       # (H, 7)
-    action_q99: np.ndarray       # (H, 7)
-    history_mean: np.ndarray     # (n_lags, 7)
-    history_std: np.ndarray      # (n_lags, 7)
+    action_q01: np.ndarray       # (H, D)
+    action_q99: np.ndarray       # (H, D)
+    history_mean: np.ndarray     # (n_lags, D)
+    history_std: np.ndarray      # (n_lags, D)
     gripper_dims: tuple[int, ...]
     provenance: dict
+    # Which rotation encoding these grids describe (UmiTrainConfig.rotation_repr).
+    # Recorded IN the artifact, not just in provenance, so the artifact is
+    # self-describing: D is 7 for "rotvec" and 10 for "rot6d", and a mismatched
+    # pair would otherwise be caught only by a downstream shape error (or, for
+    # the action grid alone, silently sliced to the first 7 columns). Defaults to
+    # "rotvec" so artifacts written before this field existed still load.
+    rotation_repr: str = "rotvec"
     # Scalar quantiles of the OBSERVED gripper, for state_mode="gripper_token"'s
     # digitization. Separate from the per-(slot, dim) action grid above, which
     # normalizes the gripper TARGET: this one normalizes the gripper STATE, and
@@ -272,6 +305,19 @@ class UmiNormStats:
             raise ValueError(
                 f"history mean {self.history_mean.shape} != std {self.history_std.shape}"
             )
+        if self.rotation_repr not in _IDENTITY_ROTATION:
+            raise ValueError(
+                f"rotation_repr={self.rotation_repr!r} must be one of "
+                f"{tuple(_IDENTITY_ROTATION)}"
+            )
+        expected = 3 + len(_IDENTITY_ROTATION[self.rotation_repr]) + 1
+        for name, arr in (("action", self.action_q01), ("history", self.history_mean)):
+            if arr.shape[-1] != expected:
+                raise ValueError(
+                    f"{name} grid is {arr.shape[-1]} dims wide but rotation_repr="
+                    f"{self.rotation_repr!r} implies {expected} (3 translation + "
+                    f"{len(_IDENTITY_ROTATION[self.rotation_repr])} rotation + 1 gripper)"
+                )
 
     @property
     def action_span(self) -> np.ndarray:
@@ -291,6 +337,7 @@ def save_umi(directory: pathlib.Path | str, stats: UmiNormStats) -> None:
         gripper_dims=np.asarray(stats.gripper_dims, dtype=np.int64),
         gripper_quantiles=np.asarray([stats.gripper_q01, stats.gripper_q99],
                                      dtype=np.float64),
+        rotation_repr=np.array(stats.rotation_repr),
         provenance=json.dumps(stats.provenance),
     )
 
@@ -313,6 +360,9 @@ def load_umi(directory: pathlib.Path | str) -> UmiNormStats:
             gripper_dims=tuple(int(d) for d in z["gripper_dims"]),
             gripper_q01=float(gq[0]),
             gripper_q99=float(gq[1]),
+            # absent on artifacts written before the rotation_repr knob existed,
+            # and those are all rotvec (rot6d did not exist yet)
+            rotation_repr=str(z["rotation_repr"]) if "rotation_repr" in z.files else "rotvec",
             provenance=json.loads(str(z["provenance"])),
         )
 
@@ -322,15 +372,18 @@ def check_umi_stats_sanity(stats: UmiNormStats) -> list[str]:
 
     Every one is a data bug rather than a tuning knob:
     - a zero-span (slot, dim) means that dim never moves at that slot, which for
-      a 7-dim all-live action space (gripper included, since it is continuous
-      here) should not happen;
+      an all-live action space (gripper included, since it is continuous here)
+      should not happen. Still true under "rot6d", whose flattest dims are the
+      two near-identity diagonal entries: measured span 4e-4 at slot 0, four
+      orders above DEGENERATE_EPS;
     - a zero history std means a lag/dim pair is constant across the dataset.
-      Exactly one such block is legitimate and expected -- lag 0's six pose
-      dims, which are the anchor in its own frame. Anything else means either
-      the lag grid collapsed (stride 0, or a dataset shorter than the window) or
-      the gripper column is dead.
+      Exactly one such block is legitimate and expected -- lag 0's pose dims
+      (six under "rotvec", nine under "rot6d"), which are the anchor in its own
+      frame. Anything else means either the lag grid collapsed (stride 0, or a
+      dataset shorter than the window) or the gripper column is dead.
     """
     problems = []
+    lag0_dims = lag0_pose_dims(stats.rotation_repr)
     span = stats.action_q99 - stats.action_q01
     n_slots, d_real = span.shape
     for d in range(d_real):
@@ -346,14 +399,15 @@ def check_umi_stats_sanity(stats: UmiNormStats) -> list[str]:
         for d in range(stats.history_std.shape[1]):
             if stats.history_std[lag, d] > DEGENERATE_EPS:
                 continue
-            if lag == 0 and d in LAG0_POSE_DIMS:
+            if lag == 0 and d in lag0_dims:
                 continue   # structural: the anchor expressed in its own frame
             problems.append(
                 f"history lag {lag} dim {d}: ~zero std (constant across the dataset)"
             )
-    if lag_zero_pose_is_nonzero(stats):
+    if lag_zero_pose_is_offset(stats):
         problems.append(
-            "history lag 0 pose dims are not identically zero — the anchor is not "
+            f"history lag 0 pose dims are not the identity pose "
+            f"{identity_pose_row(stats.rotation_repr).tolist()} — the anchor is not "
             "row 0 of the history, so the action frame and the history frame have "
             "come apart (umi_transforms.UmiRelativeActions reads poses[0])"
         )
@@ -362,18 +416,25 @@ def check_umi_stats_sanity(stats: UmiNormStats) -> list[str]:
     return problems
 
 
-def lag_zero_pose_is_nonzero(stats: UmiNormStats, tol: float = 1e-6) -> bool:
+def lag_zero_pose_is_offset(stats: UmiNormStats, tol: float = 1e-6) -> bool:
     """THE shared-anchor invariant, checked as a number.
 
     Both the action chunk and the state history are expressed in the frame of
-    `pose_history[0]`. That makes lag 0's pose part identically zero — so if its
-    mean or std is ever nonzero, the two inputs are no longer in a common frame
-    and the model is being fed an inconsistent geometry that would still train
-    to a plausible loss.
+    `pose_history[0]`. That makes lag 0's pose part the IDENTITY pose on every
+    sample — so if its mean drifts off that constant, or its std is nonzero, the
+    two inputs are no longer in a common frame and the model is being fed an
+    inconsistent geometry that would still train to a plausible loss.
+
+    The constant is representation-dependent: zeros under "rotvec", but
+    [0,0,0, 1,0,0,0,1,0] under "rot6d", where the identity ROTATION encodes as
+    the first two columns of I. Comparing against zero unconditionally (as this
+    function did while rotvec was the only option) would report every healthy
+    rot6d artifact as broken.
     """
-    mean0 = np.abs(stats.history_mean[0, list(LAG0_POSE_DIMS)])
-    std0 = np.abs(stats.history_std[0, list(LAG0_POSE_DIMS)])
-    return bool(np.any(mean0 > tol) or np.any(std0 > tol))
+    dims = list(lag0_pose_dims(stats.rotation_repr))
+    offset = np.abs(stats.history_mean[0, dims] - identity_pose_row(stats.rotation_repr))
+    std0 = np.abs(stats.history_std[0, dims])
+    return bool(np.any(offset > tol) or np.any(std0 > tol))
 
 
 def check_stats_sanity(

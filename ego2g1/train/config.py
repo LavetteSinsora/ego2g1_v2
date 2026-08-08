@@ -495,9 +495,11 @@ class UmiTrainConfig(_CommonTrainFields):
               recent MEASURED TCP poses, each expressed in the current pose's
               frame, plus the gripper, injected as one prompt token per lag
               (ego2g1.train.umi_transforms).
-    action  — 7 dims: 3 translation + 3 rotation-vector relative to the anchor
-              TCP, plus a CONTINUOUS gripper. One arm only; the other holds
-              its pose and contributes only its camera.
+    action  — 3 translation + a rotation block relative to the anchor TCP, plus
+              a CONTINUOUS gripper. One arm only; the other holds its pose and
+              contributes only its camera. The rotation encoding is the
+              `rotation_repr` A/B knob: 3 dims (rotvec, the default) or 6
+              (rot6d), so 7 or 10 dims total.
 
     No grasp head. It existed to give a calibrated probability where a BINARY
     gripper's flow sample is ambiguous; with a continuous gripper there is no
@@ -530,10 +532,34 @@ class UmiTrainConfig(_CommonTrainFields):
 
     # --- model ---
     action_dim: int = 32  # pi05_base padded width
-    # 3 translation + 3 rotation-vector + 1 continuous gripper
+    # 3 translation + rotation (rot_dim) + 1 continuous gripper. MUST be passed
+    # together with rotation_repr: 7 for "rotvec", 10 for "rot6d". __post_init__
+    # refuses a mismatch rather than deriving it, matching the sibling configs'
+    # idiom (`15 * len(hands)`, `7 * len(hands)`) and keeping the value visible
+    # in the checkpoint stamp.
     action_dim_actual: int = 7
     action_horizon: int = 50
     control_mode: str = _transforms.CONTROL_MODE_EEF
+
+    # --- rotation representation (the A/B knob) ---
+    # How relative rotations are encoded, in BOTH the action targets and the
+    # state-history rows. Everything else about the two runs is identical --
+    # dataset, normalization scheme, camera slots, loss balance (see
+    # data_config.loss_dim_weights, which rescales the rotation block so its
+    # share of the loss does not change with the dim count).
+    #
+    # "rotvec"  3 dims, the SO(3) log map. Centred on zero, minimal, unique only
+    #           for |theta| < pi (measured max on this dataset at H=50: 1.385
+    #           rad, so comfortable). The default and the measured baseline.
+    # "rot6d"   6 dims, the first two columns of R. No wraparound and continuous
+    #           in R, but redundant by 3 DOF and centred on the identity matrix.
+    #           Survives the per-(slot, dim) quantile normalization intact
+    #           (measured model-space std 0.35-0.47 at every slot, the same band
+    #           as rotvec) -- see ego2g1.train.umi_transforms.ROTATION_REPRS.
+    #
+    # NOTE this changes `stats_dir`, so the two representations never share a
+    # umi_stats.npz and computing one cannot clobber the other.
+    rotation_repr: Literal["rotvec", "rot6d"] = "rotvec"
 
     # --- how proprioception reaches the model ---
     # "history"       a window of recent MEASURED TCP poses + gripper, each
@@ -623,10 +649,15 @@ class UmiTrainConfig(_CommonTrainFields):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.action_dim_actual != 7:
+        if self.rotation_repr not in ("rotvec", "rot6d"):
+            raise ValueError(f"rotation_repr={self.rotation_repr!r} must be 'rotvec' or 'rot6d'")
+        expected = 3 + self.rot_dim + 1
+        if self.action_dim_actual != expected:
             raise ValueError(
-                f"action_dim_actual={self.action_dim_actual} != 7 "
-                "(3 translation + 3 rotation-vector + 1 continuous gripper, one arm)"
+                f"action_dim_actual={self.action_dim_actual} != {expected} for "
+                f"rotation_repr={self.rotation_repr!r} (3 translation + {self.rot_dim} "
+                "rotation + 1 continuous gripper, one arm). Pass BOTH flags: "
+                f"--rotation-repr {self.rotation_repr} --action-dim-actual {expected}"
             )
         if self.hand not in ("left", "right"):
             raise ValueError(f"hand={self.hand!r} must be 'left' or 'right'")
@@ -683,16 +714,57 @@ class UmiTrainConfig(_CommonTrainFields):
         return self.state_mode == "history"
 
     @property
-    def history_dim(self) -> int:
-        """Per-lag vector width: 3 translation + 3 rotation-vector + 1 gripper."""
+    def rot_dim(self) -> int:
+        """Width of the rotation block: 3 for "rotvec", 6 for "rot6d"."""
         from ego2g1.train import umi_transforms as _ut
 
-        return _ut.HISTORY_DIM
+        return _ut.rot_dim(self.rotation_repr)
+
+    @property
+    def history_dim(self) -> int:
+        """Per-lag vector width: 3 translation + rot_dim rotation + 1 gripper.
+
+        The same width as an action row, deliberately: history rows and action
+        rows are the same physical quantity at different times, so a divergence
+        between the two would mean the anchor composition had come apart.
+        """
+        from ego2g1.train import umi_transforms as _ut
+
+        return _ut.history_dim(self.rotation_repr)
+
+    @property
+    def rot_dims(self) -> tuple[int, ...]:
+        """Action dims carrying the rotation, between translation and gripper.
+
+        Read by `data_config.loss_dim_weights` to hold the rotation BLOCK's
+        share of the loss fixed as the dim count changes — without which
+        rot6d would silently hand rotation 50% of the loss where rotvec gives
+        it 33%, and the A/B would measure the reweighting instead of the
+        representation.
+        """
+        return tuple(range(3, 3 + self.rot_dim))
 
     @property
     def gripper_dims(self) -> tuple[int, ...]:
         """The action dim carrying the continuous gripper, at the TAIL."""
-        return (6,)
+        return (3 + self.rot_dim,)
+
+    @property
+    def stats_dir(self) -> pathlib.Path:
+        """Where umi_stats.npz lives — assets/<name>/<repo_id>[/<rotation_repr>].
+
+        Keyed by the rotation representation because the artifact's shape
+        depends on it: the (H, D) quantile grid and the (n_lags, D) per-lag
+        history stats are 7 columns wide for rotvec and 10 for rot6d. Sharing
+        one path would mean `compute_norm_stats` for one representation
+        overwrites the other's artifact — which for the rotvec runs already on
+        disk is not a hypothetical, since resuming them reloads it.
+
+        The DEFAULT representation deliberately keeps the unsuffixed path, so
+        every checkpoint written before this field existed still resolves.
+        """
+        base = self.assets_dirs / self.repo_id
+        return base if self.rotation_repr == "rotvec" else base / self.rotation_repr
 
     def model_config(self) -> _model.Ego2G1Pi0Config:
         # The injection fields are still spelled n_objects / relation_* — for
@@ -745,6 +817,9 @@ class UmiTrainConfig(_CommonTrainFields):
                 "history_dim": self.history_dim,
                 "lag_ticks": list(self.lag_ticks),
                 "clip": self.state_norm_clip,
+                # the history rows use the SAME rotation encoding as the
+                # actions, so serving cannot get one right and the other wrong
+                "rotation_repr": self.rotation_repr,
                 # measured, never commanded — see umi_transforms' docstring
                 "pose_source": "measured",
             }} if self.injects_tokens else {
@@ -756,8 +831,17 @@ class UmiTrainConfig(_CommonTrainFields):
                     "bins": self.gripper_bins,
                     "pose_source": "measured",
                 }}),
-            # serving MUST decode rotation-VECTOR rotations, not 6d
-            "relative_eef_rotvec_actions": {"required": True},
+            # WHICH rotation decode serving must apply. The flag NAME carries
+            # it, not a value inside one flag, because `stamp.check_supported`
+            # gates on names: `relative_eef_rot6d_actions` is deliberately NOT
+            # in `stamp.SUPPORTED_FEATURES`, so a rot6d checkpoint is REFUSED by
+            # the deploy path (ego2g1/deploy/modes/umi_eef.py decodes rotvec and
+            # assumes a 7-dim row) instead of being decoded with the wrong
+            # geometry. Add the name there only together with the decode itself.
+            **({"relative_eef_rotvec_actions": {"required": True}}
+               if self.rotation_repr == "rotvec"
+               else {"relative_eef_rot6d_actions": {
+                   "required": True, "rot_dims": list(self.rot_dims)}}),
             # serving MUST send a continuous gripper, not a binary open/closed
             "continuous_gripper": {"required": True, "dims": list(self.gripper_dims)},
             # serving MUST place the two cameras in these slots

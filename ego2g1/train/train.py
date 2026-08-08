@@ -931,29 +931,46 @@ def main_umi(config: _config.UmiTrainConfig):
         config.dataset_root, config.expected_config_hash, model_config_base.action_horizon,
         config.fps, config.hand, config.n_lags, max(config.lag_ticks),
     )
-    stats_dir = config.assets_dirs / config.repo_id
+    # Keyed by rotation_repr, so a rot6d stats run cannot clobber the artifact a
+    # rotvec run (including a RESUMED one) reloads. See UmiTrainConfig.stats_dir.
+    stats_dir = config.stats_dir
     stats = _norm.load_umi(stats_dir)
+    if stats.rotation_repr != config.rotation_repr:
+        raise ValueError(
+            f"{stats_dir} holds {stats.rotation_repr!r} stats but this run is "
+            f"{config.rotation_repr!r}. The two encodings have different widths, so "
+            "training on the wrong artifact would normalize the action grid against "
+            "the wrong columns. Run `python -m ego2g1.train.compute_norm_stats --umi "
+            f"--rotation-repr {config.rotation_repr} --action-dim-actual "
+            f"{config.action_dim_actual}`."
+        )
 
     # The shared-anchor invariant, checked as a number rather than trusted: both
     # the action chunk and the state history are expressed in the frame of
-    # pose_history[0], so lag 0's pose dims must be identically zero. If they are
-    # not, the two inputs are in different frames and the model would still train
-    # to a plausible-looking loss.
-    if _norm.lag_zero_pose_is_nonzero(stats):
+    # pose_history[0], so lag 0's pose dims must be the IDENTITY pose (zeros for
+    # rotvec, [0,0,0, 1,0,0,0,1,0] for rot6d). If they are not, the two inputs
+    # are in different frames and the model would still train to a
+    # plausible-looking loss.
+    if _norm.lag_zero_pose_is_offset(stats):
         raise ValueError(
-            "lag 0's pose stats are not identically zero: the action frame and the "
+            "lag 0's pose stats are not the identity pose: the action frame and the "
             "history frame have come apart. Recompute stats with this code version "
             "(`python -m ego2g1.train.compute_norm_stats --umi`)."
         )
 
     # Loss weights are DERIVED from the stats artifact, never hard-coded, so they
-    # track the data: variance-normalize every dim, then apply w_gripper. Unlike
-    # the relational config the gripper is normalized like everything else here,
-    # so w_gripper means what it reads.
+    # track the data: variance-normalize every dim, hold the rotation BLOCK's
+    # share fixed against its dim count (so rotvec and rot6d are comparable),
+    # then apply w_gripper. Unlike the relational config the gripper is
+    # normalized like everything else here, so w_gripper means what it reads.
     weights = _data_config.loss_dim_weights(
-        stats, config.action_dim_actual, config.gripper_dims, config.w_gripper
+        stats, config.action_dim_actual, config.gripper_dims, config.w_gripper,
+        rot_dims=config.rot_dims,
     )
     model_config = dataclasses.replace(model_config_base, loss_dim_weights=weights)
+    logging.info(f"rotation_repr: {config.rotation_repr} "
+                 f"({config.rot_dim} rotation dims, action_dim_actual="
+                 f"{config.action_dim_actual}); stats from {stats_dir}")
     logging.info(f"loss_dim_weights (mean 1): {[round(w, 4) for w in weights]}")
     logging.info(f"history: {config.n_lags} tokens at ticks {list(config.lag_ticks)} "
                  f"(t-0 .. t-{max(config.lag_ticks) / config.fps:.2f}s), "

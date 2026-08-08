@@ -224,8 +224,10 @@ def create_umi_data_config(
       into one `action` gather.
     - `UmiRelativeActions` and `UmiStateHistory` both read `pose_history[0]` as
       the anchor. One source, so the action frame and the history frame cannot
-      come apart; `norm.lag_zero_pose_is_nonzero` checks that invariant as a
+      come apart; `norm.lag_zero_pose_is_offset` checks that invariant as a
       number once the stats exist.
+    - Both read `rotation_repr` from the SAME config field, so the action chunk
+      and the history rows always encode rotation the same way.
 
     The history-length arguments select a pool:
       train         -> history_length_probs = train_config.history_len_probs
@@ -246,6 +248,14 @@ def create_umi_data_config(
     model_outputs = []
     if not skip_norm_stats:
         stats = _norm.load_umi(stats_dir)
+        if stats.rotation_repr != train_config.rotation_repr:
+            raise ValueError(
+                f"{stats_dir} holds {stats.rotation_repr!r} stats but the config is "
+                f"{train_config.rotation_repr!r}. The action grid would be sliced to "
+                "the wrong columns rather than failing on shape, so this is checked "
+                "explicitly (see UmiTrainConfig.stats_dir, which keys the artifact "
+                "path by representation so the two never collide in the first place)."
+            )
         d_real = train_config.action_dim_actual
         model_inputs.append(_ut.NormalizeHistory(
             mean=stats.history_mean, std=stats.history_std, clip=train_config.state_norm_clip,
@@ -303,12 +313,17 @@ def create_umi_data_config(
     data_transforms = _transforms.Group(
         inputs=[
             _ut.UmiSplitGathered(n_lags=n_lags),
-            _ut.UmiRelativeActions(),
+            # Both take the SAME rotation_repr from the SAME config field: the
+            # action chunk and the history rows are the same physical quantity
+            # at different times, so encoding them differently would be a
+            # geometry mismatch the loss would happily train around.
+            _ut.UmiRelativeActions(rotation_repr=train_config.rotation_repr),
             # Runs in BOTH modes: it produces `state` (the current gripper),
             # which the gripper-token prompt digitizes. In gripper_token mode
             # n_lags is 1, so the "history" it builds is just the anchor row
             # and nothing is injected from it.
             _ut.UmiStateHistory(
+                rotation_repr=train_config.rotation_repr,
                 length_probs=history_length_probs,
                 fixed_len=history_fixed_len,
                 permute=permute_history,
@@ -362,16 +377,41 @@ def create_umi_data_config(
 # --------------------------------------------------------------------------
 
 
-def loss_dim_weights(stats, action_dim_actual: int, gripper_dims, w_gripper: float) -> tuple[float, ...]:
+def loss_dim_weights(stats, action_dim_actual: int, gripper_dims, w_gripper: float,
+                     rot_dims: tuple[int, ...] = (), rot_block_dims: int = 3) -> tuple[float, ...]:
     """Per-dim flow-loss weights: variance-normalize first, THEN apply w_gripper.
 
-    Why the two stages must be separate. The flow target is u = noise - x1, so
+    THREE stages, in this order (each undone by reordering them):
+
+      1. 1/Var(u_d)                   — put every dim on equal footing
+      2. rot_block_dims / len(rot_dims) on the rotation dims — hold the rotation
+         BLOCK's share of the loss fixed as its dim COUNT changes
+      3. w_gripper on the gripper dims — task importance
+
+    Stage 2 exists for the UMI config's `rotation_repr` A/B and is a no-op
+    everywhere else (`rot_dims=()` by default; and for rotvec, 3/3 = 1.0, so the
+    relational config and every existing rotvec run are bitwise unaffected).
+    Without it, switching rotvec -> rot6d silently doubles rotation's share of
+    the loss, because the weights are per-DIM and 6d spends six dims on what
+    rotvec says in three. Measured on red_block_on_yellow_block_umi at
+    w_gripper=3::
+
+        translation / rotation / gripper share of the weighted MSE
+        rotvec              33.3%   33.3%   33.3%
+        rot6d, no stage 2   25.0%   50.0%   25.0%     <- reweighting, not repr
+        rot6d, stage 2      33.3%   33.3%   33.3%
+
+    so an A/B without it would be measuring the reweighting as much as the
+    encoding. `rot_block_dims` is the reference width the block is normalized
+    to (3 = "however many dims it takes, rotation is worth three EEF dims").
+
+    Why stages 1 and 3 must be separate. The flow target is u = noise - x1, so
     Var(u_d) = 1 + Var(x1_d). With grippers left raw at +-1 and EEF dims quantile
     normalized to std ~0.32, that is 1.83 vs 1.10 -- so an UNWEIGHTED MSE already
     hands the 2 gripper dims 21.6% of the loss, not 2/14 = 14.3%. Multiplying by a
     bare 3 on top of that would land at 58%, not the intended 33%.
 
-    Stage 1 (1/Var(u_d)) puts every dim on equal footing. Stage 2 (w_gripper on the
+    Stage 1 (1/Var(u_d)) puts every dim on equal footing. Stage 3 (w_gripper on the
     gripper dims) is then a statement about task importance whose meaning does not
     move when the normalization scheme changes: w_gripper=3 gives the grippers
     2*3/(12+2*3) = 33% of the loss, and would still mean "worth 3 EEF dims each"
@@ -392,6 +432,8 @@ def loss_dim_weights(stats, action_dim_actual: int, gripper_dims, w_gripper: flo
         )
     var = np.asarray(var, dtype=np.float64)[:action_dim_actual]
     w = 1.0 / (1.0 + var)
+    if rot_dims:
+        w[list(rot_dims)] *= rot_block_dims / len(rot_dims)
     w[list(gripper_dims)] *= w_gripper
     w = w / w.mean()
     return tuple(float(x) for x in w)

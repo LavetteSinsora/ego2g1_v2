@@ -55,6 +55,14 @@ SUPPORTED_FEATURES = frozenset({
     # informational
     "history_len_probs",
     "inject_ordered",
+    # DELIBERATELY ABSENT: "relative_eef_rot6d_actions", emitted by
+    # UmiTrainConfig(rotation_repr="rot6d"). The deploy path
+    # (ego2g1/deploy/modes/umi_eef.py, ego2g1/core/umi_layout.py) decodes a
+    # 7-dim row with a rotation-VECTOR rotation; a 10-dim rot6d row fed through
+    # it would be a plausible-looking pose that is geometrically wrong. Leaving
+    # the name out means `check_supported` REFUSES such a checkpoint, which is
+    # the intended state while rot6d is a training-side comparison only. Add the
+    # name here in the same change that adds the decode, never before.
 })
 
 

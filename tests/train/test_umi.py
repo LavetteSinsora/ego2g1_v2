@@ -421,6 +421,194 @@ def test_deploy_layout_agrees_with_the_training_config():
     assert umi_layout.default_lag_ticks() == c.lag_ticks
 
 
+# --------------------------------------------------- rotation_repr variants
+
+# The rot6d config, spelled once. action_dim_actual is NOT derived (see
+# UmiTrainConfig.__post_init__): the two must be passed together, so a config
+# that forgets one fails loudly instead of building a mismatched grid.
+ROT6D = {"rotation_repr": "rot6d", "action_dim_actual": 10}
+
+
+def test_rotvec_is_the_default_and_is_completely_unchanged():
+    """Every existing checkpoint and every resumed run depends on this."""
+    c = _config.UmiTrainConfig()
+    assert c.rotation_repr == "rotvec"
+    assert c.rot_dim == 3 and c.action_dim_actual == 7 and c.history_dim == 7
+    assert c.rot_dims == (3, 4, 5) and c.gripper_dims == (6,)
+    # the default representation keeps the UNSUFFIXED stats path, so artifacts
+    # written before this field existed still resolve
+    assert c.stats_dir == c.assets_dirs / c.repo_id
+
+
+def test_rot6d_widens_every_derived_dimension_consistently():
+    c = _config.UmiTrainConfig(**ROT6D)
+    assert c.rot_dim == 6 and c.history_dim == 10
+    assert c.rot_dims == (3, 4, 5, 6, 7, 8) and c.gripper_dims == (9,)
+    mc = c.model_config()
+    assert mc.action_dim_actual == 10
+    assert mc.relation_dim == 10            # the history encoder's input width
+    assert mc.n_objects == c.n_lags         # unchanged: same number of tokens
+    assert mc.action_dim == 32              # still fits the pi05 pad width
+
+
+def test_rot6d_stats_live_in_their_own_directory():
+    """Otherwise `compute_norm_stats` for one representation overwrites the
+    other's artifact — which a RESUMED rotvec run would then load."""
+    rv, r6 = _config.UmiTrainConfig(), _config.UmiTrainConfig(**ROT6D)
+    assert rv.stats_dir != r6.stats_dir
+    assert r6.stats_dir == rv.stats_dir / "rot6d"
+
+
+@pytest.mark.parametrize("bad", [
+    {"rotation_repr": "rot6d"},                              # forgot the width
+    {"rotation_repr": "rot6d", "action_dim_actual": 7},
+    {"rotation_repr": "rotvec", "action_dim_actual": 10},
+    {"rotation_repr": "quaternion", "action_dim_actual": 8},
+])
+def test_config_rejects_a_representation_width_mismatch(bad):
+    with pytest.raises(ValueError, match="rotation_repr|action_dim_actual"):
+        _config.UmiTrainConfig(**bad)
+
+
+def test_rot6d_is_refused_by_the_deploy_stamp():
+    """Deploy decodes a 7-dim ROTVEC row (ego2g1/deploy/modes/umi_eef.py). A
+    rot6d checkpoint pushed through it would produce a plausible-looking but
+    geometrically wrong pose, so `check_supported` must refuse it outright."""
+    from ego2g1.train import stamp as _stamp
+
+    flags = _config.UmiTrainConfig(**ROT6D).feature_flags()
+    assert flags["relative_eef_rot6d_actions"]["required"] is True
+    assert "relative_eef_rotvec_actions" not in flags
+    assert "relative_eef_rot6d_actions" not in _stamp.SUPPORTED_FEATURES
+    required = {k for k, v in flags.items() if isinstance(v, dict) and v.get("required")}
+    assert not required <= _stamp.SUPPORTED_FEATURES
+
+
+def test_rot6d_records_its_encoding_in_the_history_flag():
+    """History rows and action rows share the encoding; serving must not be able
+    to get one right and the other wrong."""
+    assert _config.UmiTrainConfig(**ROT6D).feature_flags()[
+        "state_history"]["rotation_repr"] == "rot6d"
+    assert _config.UmiTrainConfig().feature_flags()[
+        "state_history"]["rotation_repr"] == "rotvec"
+
+
+def test_norm_identity_constant_matches_the_transform():
+    """norm.py duplicates the identity-rotation constant rather than importing
+    umi_transforms (which pulls in openpi); this is what keeps the two in sync."""
+    for repr_ in _ut.ROTATION_REPRS:
+        np.testing.assert_allclose(
+            _norm.identity_pose_row(repr_)[3:], _ut.identity_rotation(repr_))
+        assert _norm.lag0_pose_dims(repr_) == tuple(range(3 + _ut.rot_dim(repr_)))
+    assert _norm.lag0_pose_dims("rotvec") == _norm.LAG0_POSE_DIMS
+
+
+def test_rot6d_lag_zero_is_the_identity_not_zero():
+    """THE thing that breaks if the invariant is left comparing against zero:
+    6d's identity rotation is [1,0,0,0,1,0], so a healthy rot6d artifact has a
+    lag-0 mean of 1 on two dims."""
+    ident = _ut.identity_rotation("rot6d")
+    assert ident.tolist() == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    n_lags, h, d = 3, 4, 10
+    mean = np.zeros((n_lags, d))
+    mean[0, 3:9] = ident            # lag 0 IS the anchor in its own frame
+    std = np.ones((n_lags, d))
+    std[0, :9] = 0.0                # structural, all nine pose dims
+    s = _norm.UmiNormStats(
+        action_q01=np.tile(np.linspace(-1, -0.1, d), (h, 1)),
+        action_q99=np.tile(np.linspace(0.1, 1, d), (h, 1)),
+        history_mean=mean, history_std=std, gripper_dims=(9,),
+        rotation_repr="rot6d", provenance={})
+    assert not _norm.lag_zero_pose_is_offset(s)
+    assert _norm.check_umi_stats_sanity(s) == []
+    # and it still catches a REAL drift
+    s.history_mean[0, 3] = 0.5
+    assert _norm.lag_zero_pose_is_offset(s)
+
+
+def test_stats_artifact_refuses_a_width_representation_mismatch():
+    n_lags, h = 3, 4
+    with pytest.raises(ValueError, match="rotation_repr"):
+        _norm.UmiNormStats(
+            action_q01=np.zeros((h, 10)), action_q99=np.ones((h, 10)),
+            history_mean=np.zeros((n_lags, 10)), history_std=np.ones((n_lags, 10)),
+            gripper_dims=(9,), rotation_repr="rotvec", provenance={})
+
+
+def test_rotation_repr_survives_the_stats_roundtrip(tmp_path):
+    s = _stats()
+    assert s.rotation_repr == "rotvec"       # default for pre-existing artifacts
+    _norm.save_umi(tmp_path, s)
+    assert _norm.load_umi(tmp_path).rotation_repr == "rotvec"
+
+
+def test_transforms_agree_on_the_encoding_for_both_representations():
+    """Same motion, two encodings: translation and gripper must be untouched and
+    the rotations must decode to the same matrix."""
+    from ego2g1.core import rot6d as _r6
+    from ego2g1.core import rotvec as _rv
+
+    rng = np.random.default_rng(0)
+    anchor = np.concatenate([rng.normal(size=3), _r6.mat_to_6d(np.eye(3))])
+    tgt = np.stack([
+        np.concatenate([rng.normal(size=3) * 0.05,
+                        _r6.mat_to_6d(_rv.rotvec_to_mat(rng.normal(size=3) * 0.1)),
+                        [0.5]])
+        for _ in range(6)
+    ])
+    data = {"observation/pose_history": anchor[None, :],
+            "observation/targets": tgt}
+    a_rv = _ut.UmiRelativeActions(rotation_repr="rotvec")(dict(data))["actions"]
+    a_r6 = _ut.UmiRelativeActions(rotation_repr="rot6d")(dict(data))["actions"]
+    assert a_rv.shape == (6, 7) and a_r6.shape == (6, 10)
+    np.testing.assert_allclose(a_rv[:, :3], a_r6[:, :3])
+    np.testing.assert_allclose(a_rv[:, -1], a_r6[:, -1])
+    np.testing.assert_allclose(
+        _rv.rotvec_to_mat(a_rv[:, 3:6]), _r6.rot6d_to_mat(a_r6[:, 3:9]), atol=1e-6)
+
+
+def test_history_rows_widen_with_the_representation():
+    n = 4
+    poses, grip = _history(n, grip=[9.0, 8.0, 7.0, 6.0])
+    data = {"observation/pose_history": poses, "observation/gripper_history": grip}
+    rv = _ut.UmiStateHistory(rotation_repr="rotvec")(dict(data))["history"]
+    r6 = _ut.UmiStateHistory(rotation_repr="rot6d")(dict(data))["history"]
+    assert rv.shape == (n, 7) and r6.shape == (n, 10)
+    # lag 0 is the anchor in its own frame, in each encoding
+    np.testing.assert_allclose(rv[0, :6], np.zeros(6), atol=1e-6)
+    np.testing.assert_allclose(r6[0, :9], _norm.identity_pose_row("rot6d"), atol=1e-6)
+    # the gripper is the last dim in BOTH, not a fixed index 6
+    np.testing.assert_allclose(rv[:, -1], r6[:, -1])
+
+
+def test_loss_weights_hold_the_rotation_block_share_across_representations():
+    """Without the rotation stage, rot6d silently gives rotation 50% of the loss
+    where rotvec gives it 33% — so the A/B would measure the reweighting."""
+    from ego2g1.train import data_config as _dc
+
+    class _S:
+        def __init__(self, d):
+            self.provenance = {"model_space_variance": [0.16] * d}
+
+    def shares(d, rot_dims, grip, **kw):
+        w = _dc.loss_dim_weights(_S(d), d, grip, 3.0, **kw)
+        var = 0.16
+        tot = sum(wi * (1 + var) for wi in w)
+        return tuple(sum(w[i] * (1 + var) for i in dims) / tot
+                     for dims in (range(3), rot_dims, grip))
+
+    rv = shares(7, (3, 4, 5), (6,), rot_dims=(3, 4, 5))
+    r6 = shares(10, tuple(range(3, 9)), (9,), rot_dims=tuple(range(3, 9)))
+    assert rv == pytest.approx((1 / 3, 1 / 3, 1 / 3))
+    assert r6 == pytest.approx((1 / 3, 1 / 3, 1 / 3))
+    # rotvec must be BITWISE unaffected by the new argument (3/3 == 1.0), or the
+    # two checkpoints already on disk would resume against different weights
+    assert (_dc.loss_dim_weights(_S(7), 7, (6,), 3.0)
+            == _dc.loss_dim_weights(_S(7), 7, (6,), 3.0, rot_dims=(3, 4, 5)))
+    # and this is what the stage prevents
+    assert shares(10, tuple(range(3, 9)), (9,)) == pytest.approx((0.25, 0.5, 0.25))
+
+
 # ------------------------------------------------------- state_mode variants
 
 
@@ -620,7 +808,7 @@ def test_stats_sanity_flags_a_dead_gripper_column():
 def test_stats_sanity_flags_a_broken_shared_anchor():
     s = _stats()
     s.history_mean[0, 0] = 0.5
-    assert _norm.lag_zero_pose_is_nonzero(s)
+    assert _norm.lag_zero_pose_is_offset(s)
     assert any("come apart" in p for p in _norm.check_umi_stats_sanity(s))
 
 

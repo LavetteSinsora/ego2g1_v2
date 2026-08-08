@@ -382,7 +382,11 @@ def _umi_episode_frames(train_config, split: str):
 
 
 def umi_raw_action_chunks(train_config, action_horizon, *, split: str = "train") -> np.ndarray:
-    """Every raw 7-dim relative action chunk of a split, from parquet only. (N, H, 7).
+    """Every raw relative action chunk of a split, from parquet only. (N, H, D).
+
+    D is `train_config.action_dim_actual` — 7 under rotation_repr="rotvec", 10
+    under "rot6d". The chunk is built by the SAME transform the training path
+    uses, configured from the same field, so the two cannot encode differently.
 
     Reproduces exactly what training will see, including the two boundary rules:
     anchors start at t = 1 (tick 0 has no real anchor — see umi_extraction_meta),
@@ -392,7 +396,7 @@ def umi_raw_action_chunks(train_config, action_horizon, *, split: str = "train")
     """
     from ego2g1.train import umi_transforms as _ut
 
-    tf = _ut.UmiRelativeActions()
+    tf = _ut.UmiRelativeActions(rotation_repr=train_config.rotation_repr)
     chunks = []
     for _, act in _umi_episode_frames(train_config, split):
         length = len(act)
@@ -407,18 +411,22 @@ def umi_raw_action_chunks(train_config, action_horizon, *, split: str = "train")
     if not chunks:
         raise ValueError(f"split {split!r} has no episodes")
     out = np.stack(chunks).astype(np.float64)
-    if out.shape[-1] != 7:
-        raise ValueError(f"built {out.shape[-1]}-dim actions, expected 7")
+    expected = train_config.action_dim_actual
+    if out.shape[-1] != expected:
+        raise ValueError(
+            f"built {out.shape[-1]}-dim actions, expected {expected} for "
+            f"rotation_repr={train_config.rotation_repr!r}")
     return out
 
 
 def umi_raw_history(train_config, *, split: str = "train", full_only: bool = True) -> np.ndarray:
-    """Every raw (n_lags, 7) history block of a split, from parquet only.
+    """Every raw (n_lags, D) history block of a split, from parquet only.
 
-    (N, n_lags, 7). With `full_only` (the default) only anchors whose whole
-    window exists are returned — which is what the PER-LAG stats must be
-    computed over: lag j's mean/std has to come from samples where lag j is
-    real, not from clamped duplicates of the episode's first frame.
+    (N, n_lags, D), D = `train_config.history_dim`. With `full_only` (the
+    default) only anchors whose whole window exists are returned — which is what
+    the PER-LAG stats must be computed over: lag j's mean/std has to come from
+    samples where lag j is real, not from clamped duplicates of the episode's
+    first frame.
 
     Also feeds the random-history val pool (umi_transforms.UmiStateHistory.pool),
     where full blocks are likewise the right thing to draw from.
@@ -426,7 +434,7 @@ def umi_raw_history(train_config, *, split: str = "train", full_only: bool = Tru
     from ego2g1.train import umi_transforms as _ut
 
     lags = train_config.lag_ticks
-    tf = _ut.UmiStateHistory()
+    tf = _ut.UmiStateHistory(rotation_repr=train_config.rotation_repr)
     span = max(lags)
     blocks = []
     for _, act in _umi_episode_frames(train_config, split):

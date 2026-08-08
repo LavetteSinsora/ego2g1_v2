@@ -84,11 +84,75 @@ from ego2g1.train.transforms import CONTROL_MODE_EEF, _parse_image
 # the k-th occurrence always receives the k-th injected row whatever it means.
 HISTORY_SENTINEL = RELATION_SENTINEL
 
-# Per-lag vector width: 3 translation + 3 rotation-vector + 1 gripper.
+# Per-lag vector width in the DEFAULT (rotation-vector) representation:
+# 3 translation + 3 rotation-vector + 1 gripper. Use `history_dim(repr)` for the
+# representation-dependent value; this constant is the rotvec answer and is what
+# `ego2g1.core.umi_layout` (the deploy-side layout) is pinned to.
 HISTORY_DIM = 7
 
 # Absolute pose width in the dataset's `action` column, before the gripper.
 POSE_DIM = 9
+
+# --------------------------------------------------------------------------
+# rotation representation
+# --------------------------------------------------------------------------
+#
+# WHICH ENCODING the relative rotations use, in BOTH the action targets and the
+# state-history rows. A comparative knob, not a tuning knob: the two are exactly
+# the same experiment apart from these six numbers vs three.
+#
+# "rotvec" (default) — SO(3) log map, 3 dims. Centred on ZERO, minimal, and the
+#     encoding this config was designed and measured on. Unique only for
+#     |theta| < pi, which bounds the horizon; measured max on
+#     red_block_on_yellow_block_umi at H=50 is 1.385 rad, comfortable.
+# "rot6d" — the first two columns of R, 6 dims. Centred on the IDENTITY matrix,
+#     no wraparound at all, continuous as a function of R (which the log map is
+#     not, at theta = pi). Redundant by 3 DOF: two of the six entries (R00, R11)
+#     are 1 - O(theta^2), i.e. determined by the other four to second order, and
+#     `rot6d_to_mat` Gram-Schmidts most of their error away at decode.
+#
+# Both work under this config's per-(slot, dim) quantile action normalization,
+# which is what makes the comparison possible at all: it lands EVERY dim at
+# model-space std 0.35-0.47 whichever encoding is chosen. A pooled scheme would
+# not — see ego2g1.core.rotvec's docstring, whose ~7000x amplification warning is
+# about the pooled E001 scheme rather than this one.
+ROTATION_REPRS = ("rotvec", "rot6d")
+
+# Rotation-block width per representation.
+_ROT_DIMS = {"rotvec": 3, "rot6d": 6}
+
+
+def rot_dim(rotation_repr: str) -> int:
+    """Width of the rotation block: 3 for rotvec, 6 for rot6d."""
+    if rotation_repr not in _ROT_DIMS:
+        raise ValueError(f"rotation_repr={rotation_repr!r} must be one of {ROTATION_REPRS}")
+    return _ROT_DIMS[rotation_repr]
+
+
+def history_dim(rotation_repr: str) -> int:
+    """Per-lag / per-slot vector width: 3 translation + rotation + 1 gripper."""
+    return 3 + rot_dim(rotation_repr) + 1
+
+
+def encode_rotation(R, rotation_repr: str) -> np.ndarray:
+    """(..., 3, 3) rotation matrices -> (..., rot_dim) encoding."""
+    if rotation_repr == "rotvec":
+        return _rotvec.mat_to_rotvec(R)
+    if rotation_repr == "rot6d":
+        return _rot6d.mat_to_6d(R)
+    raise ValueError(f"rotation_repr={rotation_repr!r} must be one of {ROTATION_REPRS}")
+
+
+def identity_rotation(rotation_repr: str) -> np.ndarray:
+    """The encoding of the IDENTITY rotation, (rot_dim,).
+
+    Zeros for rotvec; [1, 0, 0, 0, 1, 0] for rot6d (the first two columns of I).
+    This is what lag 0 of the state history always encodes -- the anchor
+    expressed in its own frame -- so it is the constant every "lag 0 is
+    structurally constant" check must compare against, rather than assuming
+    zero. See `ego2g1.train.norm.lag_zero_pose_is_offset`.
+    """
+    return encode_rotation(np.eye(3), rotation_repr)
 
 # The prompt segment carrying the injected history tokens. Named for what it
 # holds -- OBSERVED past state, not past commands. If a commanded-pose variant
@@ -206,20 +270,28 @@ class UmiRelativeActions(_transforms.DataTransformFn):
     For each slot k::
 
         delta_k = inv(T_anchor) @ T_target_k
-        out[k]  = [delta_k translation (3), log(delta_k rotation) (3), gripper]
+        out[k]  = [delta_k translation (3), rot(delta_k rotation), gripper]
 
     The anchor is row 0 of the pose history, i.e. the measured TCP at the
     observation tick. Reading it from there rather than from a field of its own
     is the point: ONE anchor, one source, so the action frame and the history
     frame cannot drift apart under a later edit.
 
-    Rotation is a ROTATION VECTOR, not 6d. Over this dataset's 50-slot chunk the
-    relative rotation is small, so a 6d encoding would sit on the identity
-    matrix and the signal would live inside the encoding's own noise floor; as
-    rotation vectors, measured here, slot 0 has std 0.005-0.010 rad and slot 49
-    has 0.15-0.33. The log map is unique only for |theta| < pi, which bounds the
-    horizon -- max observed on this dataset at H=50 is 1.21 rad, comfortable but
-    re-measure before raising H. See ego2g1.core.rotvec.
+    Rotation encoding is `rotation_repr` (see ROTATION_REPRS). The DEFAULT is a
+    ROTATION VECTOR, not 6d, and that default is measured rather than assumed:
+    over this dataset's 50-slot chunk the relative rotation is small, so a 6d
+    encoding sits on the identity matrix -- its R00/R11 entries are 1 - O(th^2)
+    and carry std 1.3e-4 at slot 0 against 5.8e-3 for the same rotation as a
+    rotvec. The log map is unique only for |theta| < pi, which bounds the
+    horizon -- max observed on this dataset at H=50 is 1.385 rad, comfortable
+    but re-measure before raising H. See ego2g1.core.rotvec.
+
+    "rot6d" exists so that claim can be TESTED rather than trusted. It survives
+    the per-(slot, dim) quantile normalization (measured model-space std
+    0.35-0.47 at every slot, same band as rotvec) at the cost of two redundant
+    dims and a heavier tail: max |normalized| is 13.3 vs 4.1, so
+    `model_space_clamp=10` fires on ~8e-6 of entries where under rotvec it never
+    fires.
 
     The gripper is CONTINUOUS and passes through raw, to be normalized per
     (slot, dim) alongside every other dim. Deliberately not binarized: a
@@ -229,6 +301,8 @@ class UmiRelativeActions(_transforms.DataTransformFn):
     the real ramp (measured: ~14% of frames sit strictly between the open and
     closed plateaus), so there is a genuine graded signal to learn.
     """
+
+    rotation_repr: str = "rotvec"
 
     def __call__(self, data: dict) -> dict:
         if "observation/targets" not in data or "observation/pose_history" not in data:
@@ -243,9 +317,10 @@ class UmiRelativeActions(_transforms.DataTransformFn):
         t_tgt = _rot6d.vec9_to_se3(target[:, :POSE_DIM])                          # (H, 4, 4)
         delta = np.linalg.inv(t_anchor) @ t_tgt
 
-        eef = np.empty((target.shape[0], 6), dtype=np.float64)
+        d_rot = rot_dim(self.rotation_repr)
+        eef = np.empty((target.shape[0], 3 + d_rot), dtype=np.float64)
         eef[:, :3] = delta[:, :3, 3]
-        eef[:, 3:] = _rotvec.mat_to_rotvec(delta[:, :3, :3])
+        eef[:, 3:] = encode_rotation(delta[:, :3, :3], self.rotation_repr)
         out["actions"] = np.concatenate([eef, target[:, POSE_DIM:]], axis=-1).astype(np.float32)
         return out
 
@@ -282,12 +357,24 @@ class UmiStateHistory(_transforms.DataTransformFn):
     Row j is the state at tick `t - lags[j]`, expressed in the anchor's frame::
 
         delta_j = inv(T_anchor) @ T_j
-        row_j   = [delta_j translation (3), log(delta_j rotation) (3), gripper_j]
+        row_j   = [delta_j translation (3), rot(delta_j rotation), gripper_j]
 
-    Row 0's pose part is therefore exactly zero for every sample -- structural,
-    documented, and handled by the per-lag normalizer's std floor plus an
-    explicit exemption in the stats sanity check, rather than hidden. Its
-    gripper dim is the current one.
+    Row 0's pose part is therefore the IDENTITY pose for every sample -- exactly
+    zero under "rotvec", and [0,0,0, 1,0,0,0,1,0] under "rot6d", which is the
+    same constant expressed in a representation that is not centred on zero.
+    Structural, documented, and handled by the per-lag normalizer's std floor
+    plus an explicit exemption in the stats sanity check, rather than hidden.
+
+    That constant reaches the model as ZERO under BOTH representations, which is
+    what keeps the comparison clean: `NormalizeHistory` z-scores per lag, so lag
+    0's pose dims become (c - mean) / max(std, 1e-6) = (c - c) / 1e-6 = 0. The
+    std FLOOR is what makes that a zero rather than a 0/0 -- the measured std
+    there is ~1e-16 (float noise in inv(A) @ A), not a true zero. So the 6d
+    representation's identity offset is removed by normalization and costs the
+    model nothing; only the six-vs-three dims differ.
+
+    Row 0's gripper dim is the current aperture, and is the reason the row is
+    carried at all.
 
     LENGTH. `length_probs` draws how many leading rows survive; rows beyond that
     are zeroed AND the prompt emits only that many sentinels, so the model
@@ -307,6 +394,7 @@ class UmiStateHistory(_transforms.DataTransformFn):
     a motion and they are otherwise a ~2.5% tail.
     """
 
+    rotation_repr: str = "rotvec"
     length_probs: tuple[float, ...] | None = None   # train: draw; None: no truncation
     fixed_len: int | None = None                    # val: pin the length
 
@@ -353,18 +441,20 @@ class UmiStateHistory(_transforms.DataTransformFn):
                 "off-by-one) and must be excluded via anchor_bad, not trained on"
             )
 
+        d_hist = history_dim(self.rotation_repr)
+        d_rot = rot_dim(self.rotation_repr)
         t_anchor = _rot6d.vec9_to_se3(poses[0])
         t_lags = _rot6d.vec9_to_se3(poses)                                   # (n_lags, 4, 4)
         delta = np.linalg.inv(t_anchor) @ t_lags
-        rows = np.empty((n_lags, HISTORY_DIM), dtype=np.float64)
+        rows = np.empty((n_lags, d_hist), dtype=np.float64)
         rows[:, :3] = delta[:, :3, 3]
-        rows[:, 3:6] = _rotvec.mat_to_rotvec(delta[:, :3, :3])
-        rows[:, 6] = grip[:, 0]
+        rows[:, 3:3 + d_rot] = encode_rotation(delta[:, :3, :3], self.rotation_repr)
+        rows[:, 3 + d_rot] = grip[:, 0]
 
         if self.pool is not None:
             rows = np.array(self.pool[random.randrange(len(self.pool))], dtype=np.float64)
-            if rows.shape != (n_lags, HISTORY_DIM):
-                raise ValueError(f"history pool entry {rows.shape} vs ({n_lags}, {HISTORY_DIM})")
+            if rows.shape != (n_lags, d_hist):
+                raise ValueError(f"history pool entry {rows.shape} vs ({n_lags}, {d_hist})")
 
         if self.fixed_len is not None:
             drawn = int(self.fixed_len)
@@ -415,10 +505,18 @@ class NormalizeHistory(_transforms.DataTransformFn):
     `history_len` sentinels are emitted), so they reach nothing; they are left
     alone rather than re-masked because a mask would have to be threaded through
     `Observation` for no observable effect.
+
+    LAG 0's POSE DIMS. Their raw value is the identity pose -- zeros under
+    "rotvec", [0,0,0, 1,0,0,0,1,0] under "rot6d" -- and their measured std is
+    ~1e-16, i.e. float noise from inv(A) @ A rather than a true zero. The
+    `max(std, 1e-6)` floor is what turns (c - c) / ~0 into a clean 0 instead of
+    a 0/0, and it does so for BOTH representations: 6d's identity offset is
+    subtracted off by `mean` and the model sees the same all-zero lag-0 pose
+    token either way. Nothing downstream special-cases it.
     """
 
-    mean: np.ndarray   # (n_lags, 7)
-    std: np.ndarray    # (n_lags, 7)
+    mean: np.ndarray   # (n_lags, D_hist)
+    std: np.ndarray    # (n_lags, D_hist)
     clip: float = 5.0
 
     def __call__(self, data: dict) -> dict:
