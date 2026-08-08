@@ -553,6 +553,30 @@ def test_inputs_omit_relations_when_nothing_is_injected():
     assert out["relations"].shape == (3, 7)
 
 
+@pytest.mark.parametrize("mode,pools", [
+    ("history", [{"history_fixed_len": 6},
+                 {"history_fixed_len": 6, "permute_history": True},
+                 {"history_fixed_len": 0}]),
+    ("gripper_token", [{}, {"shuffle_gripper": True}, {"omit_gripper": True}]),
+])
+def test_every_val_pool_kwarg_builds_a_data_config(mode, pools):
+    """main_umi passes these straight through as **kwargs; a name that
+    create_umi_data_config does not accept only explodes at val-pool
+    construction time, minutes into a run."""
+    from ego2g1.train import data_config as _dc
+
+    c = _config.UmiTrainConfig(state_mode=mode)
+    mc = c.model_config()
+    for kwargs in pools:
+        cfg = _dc.create_umi_data_config(c, mc, stats_dir="/nonexistent",
+                                         skip_norm_stats=True, **kwargs)
+        assert cfg.repo_id == c.repo_id
+        # the injection field must be present iff this mode has an encoder
+        names = [type(t).__name__ for t in cfg.data_transforms.inputs]
+        assert ("UmiPrompt" in names) == c.injects_tokens
+        assert ("UmiGripperPrompt" in names) != c.injects_tokens
+
+
 def test_relation_config_is_untouched_by_inject_ordered():
     """The UMI config must not have changed the relational one's behaviour."""
     mc = _config.EgoRelationTrainConfig().model_config()

@@ -1034,6 +1034,7 @@ def main_umi(config: _config.UmiTrainConfig):
         full = config.n_lags
         if config.injects_tokens:
             history_pool = _umi_dataset.umi_raw_history(config, split="val", full_only=True)
+            logging.info(f"random-history val pool: {history_pool.shape}")
             pool_kwargs = {
                 "val": {"history_fixed_len": full},
                 "val_permuted": {"history_fixed_len": full, "permute_history": True},
@@ -1070,8 +1071,8 @@ def main_umi(config: _config.UmiTrainConfig):
             )
             val_pools[prefix] = list(iter(_data_loader.DataLoaderImpl(pool_cfg, val_loader)))
         logging.info(f"Loaded {config.eval_num_batches} fixed val batches x {len(val_pools)} pools "
-                     f"({len(val_dataset)} datapoints from {len(config.val_source_episodes)} episodes; "
-                     f"random-history pool {history_pool.shape})")
+                     f"{sorted(val_pools)} ({len(val_dataset)} datapoints from "
+                     f"{len(config.val_source_episodes)} episodes)")
     elif config.eval_interval > 0:
         logging.warning("eval_interval > 0 but val_source_episodes is empty — validation disabled")
 
