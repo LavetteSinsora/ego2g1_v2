@@ -1,0 +1,25 @@
+# envs/ppu-extract-constraints.txt — the extraction / perception-v2 venv core.
+#
+# Applied automatically by envs/ppu-extract.sh via UV_CONSTRAINT / PIP_CONSTRAINT.
+# Note this is NOT the same numpy window as envs/ppu-train-constraints.txt, and
+# that difference is deliberate (see the profile header).
+#
+# Verified 2026-08-08: numpy 1.26.4, torch 2.9.0 / 16 devices,
+# transformers 5.14.1, Sam3Model imports.
+
+# --- numpy: no JAX in this venv, so nothing forces >=2. Staying below 2 matches
+#     the container image (compiled at numpy 1.26) and the repo pyproject, which
+#     means the image's sklearn/pandas/scipy work as-is — none of the
+#     "numpy.dtype size changed" shadowing the training venv has to do.
+numpy<2
+
+# --- torch/torchvision: provided by the container image via
+#     --system-site-packages. The PPU index has only build-shim sdists for
+#     these, and the shim finds no artifact for some versions on
+#     cp312/ubuntu2404/cu129/sdk2.1.0. Never let a resolver choose one.
+torch==2.9.0
+torchvision==0.24.0
+
+# --- datasets: must match what the training environment reads back. Newer
+#     versions write parquet the training env cannot load.
+datasets==3.6.0
