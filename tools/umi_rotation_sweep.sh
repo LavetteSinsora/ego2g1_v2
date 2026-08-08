@@ -157,8 +157,13 @@ if [ -f "$RV_STATS" ]; then
     echo "  $RV_STATS"
 else
     say "rotvec stats: restoring from the checkpoints that trained on them"
-    RESTORE=(--source "$RUNS/umi_wrist/$EXP_RV_HIST"
-             --also   "$RUNS/umi_wrist/$EXP_RV_TOK"
+    # Both checkpoints are offered; the tool picks the one that can actually
+    # serve, after checking they agree. That choice is NOT "the first one": the
+    # history run predates the gripper quantiles (they arrived with
+    # state_mode="gripper_token"), so its copy has NaN there and cannot feed the
+    # gripper_token resume, even though its grids are correct and identical.
+    RESTORE=(--candidate "$RUNS/umi_wrist/$EXP_RV_HIST"
+             --candidate "$RUNS/umi_wrist/$EXP_RV_TOK"
              --assets-base-dir "$ASSETS")
     # Free evidence if a stray recompute is lying around: reports whether it
     # would have matched. Never blocks either way.

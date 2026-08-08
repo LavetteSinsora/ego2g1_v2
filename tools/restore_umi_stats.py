@@ -22,26 +22,37 @@ The checkpoint's own `assets_ego2g1/umi_stats.npz` is the artifact that run
 actually used. Copying it back is exact by construction, and needs no argument
 about what has or has not changed.
 
-WHAT IT CHECKS BEFORE COPYING. The point is to be able to trust the result, so
-it refuses rather than warns:
+IT PICKS THE SOURCE ITSELF, from the candidates you name. Which checkpoint's
+copy is usable is not obvious and is not the operator's problem to solve:
 
-  - the source is the representation you asked for;
-  - the source has a FULL lag grid (n_lags rows). Both state modes share one
-    artifact per representation -- legitimately, since the action grid and the
-    gripper quantiles do not depend on state_mode -- but only the history-mode
-    file works for both, because a gripper_token run computes a 1-lag grid that
-    a history run cannot use;
-  - every OTHER checkpoint given on the command line agrees with the source on
-    the action grid, the gripper dims and the gripper quantiles, bit for bit.
-    That is what licenses restoring ONE file and resuming BOTH runs off it. A
-    mismatch means the two runs were never normalizing the same way and the
-    comparison between them was already invalid -- worth knowing loudly.
+  - the artifact must have a FULL lag grid (n_lags rows). Both state modes share
+    one artifact per representation -- legitimately, since the action grid and
+    the gripper quantiles do not depend on state_mode -- but only a
+    history-length grid works for both, because a gripper_token COMPUTE produces
+    a 1-lag grid that a history run cannot use;
+  - it must carry the gripper QUANTILES. A run that predates the field
+    (gripper_q01/q99 arrived with state_mode="gripper_token", in c4cecbb) has
+    NaN there. That is invisible to a history run, which never reads them, and
+    fatal to a gripper_token run, which refuses to digitize without them. So the
+    older checkpoint of a pair can be the one that cannot serve the restore.
+
+CONSISTENCY IS STILL ENFORCED across every candidate, because restoring ONE file
+and resuming SEVERAL runs off it is only licensed if they were all normalizing
+the same way:
+
+  - action_q01/q99 and gripper_dims must be bit-identical. A difference means
+    those runs never shared a normalization and comparing them was already
+    invalid -- worth knowing loudly;
+  - history grids of the same height must be bit-identical;
+  - gripper quantiles: NaN on one side is ABSENCE, not disagreement -- an
+    artifact written before the field existed is a subset of one written after,
+    not a conflict with it. Two DIFFERENT non-NaN values are a real conflict.
 
 Usage (from the repo root, with the train profile sourced):
 
     python -m tools.restore_umi_stats \\
-        --source   /mnt/cpfs/hxy/runs/ego2g1_v2/umi_wrist/umi \\
-        --also     /mnt/cpfs/hxy/runs/ego2g1_v2/umi_wrist/umi_no_state_history \\
+        --candidate /mnt/cpfs/hxy/runs/ego2g1_v2/umi_wrist/umi \\
+        --candidate /mnt/cpfs/hxy/runs/ego2g1_v2/umi_wrist/umi_no_state_history \\
         --assets-base-dir /mnt/cpfs/hxy/runs/ego2g1_v2/assets
 
 Add --force to overwrite an existing staging file (it refuses by default: an
@@ -81,12 +92,12 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--source", required=True, type=pathlib.Path,
-                   help="checkpoint dir to restore FROM; use the HISTORY-mode run, "
-                        "whose full lag grid serves both state modes")
-    p.add_argument("--also", action="append", default=[], type=pathlib.Path,
-                   help="other checkpoint dirs that must agree with the source "
-                        "(repeatable)")
+    p.add_argument("--candidate", action="append", required=True, dest="candidates",
+                   type=pathlib.Path, metavar="DIR",
+                   help="checkpoint dir whose assets_ego2g1/ copy may serve as the "
+                        "source (repeatable). All must agree; the first USABLE one "
+                        "is restored — see this module's docstring for what usable "
+                        "means, and why it is not simply the first one given")
     p.add_argument("--assets-base-dir", required=True, type=pathlib.Path)
     p.add_argument("--rotation-repr", default="rotvec", choices=("rotvec", "rot6d"))
     p.add_argument("--force", action="store_true",
@@ -106,55 +117,92 @@ def main(argv=None) -> int:
     dest_dir = cfg.stats_dir
     dest = dest_dir / "umi_stats.npz"
 
-    src, src_path = _load(a.source)
-    print(f"source: {src_path}")
-    print(f"  rotation_repr={src.rotation_repr}  action grid {src.action_q01.shape}  "
-          f"history {src.history_mean.shape}  gripper_dims={src.gripper_dims}")
-    print(f"  provenance lag_ticks={src.provenance.get('lag_ticks')}  "
-          f"num_chunks={src.provenance.get('num_chunks')}")
-
+    loaded = [(*_load(d), d) for d in a.candidates]
     problems = []
-    if src.rotation_repr != a.rotation_repr:
-        problems.append(f"source is {src.rotation_repr!r}, not {a.rotation_repr!r}")
-    if src.history_mean.shape[0] != cfg.n_lags:
-        problems.append(
-            f"source has a {src.history_mean.shape[0]}-lag history grid, expected "
-            f"{cfg.n_lags}. It came from a gripper_token run; restore from the "
-            "HISTORY-mode checkpoint instead — its grid serves both modes, this one "
-            "does not")
 
-    # The invariant that licenses one staging file for two runs.
-    for other in a.also:
-        o, o_path = _load(other)
+    print("candidates:")
+    for st, path, _ in loaded:
+        q = ("absent (predates the field)" if st.gripper_q01 != st.gripper_q01
+             else f"{st.gripper_q01:.4f}..{st.gripper_q99:.4f}")
+        print(f"  {path}\n"
+              f"    rotation_repr={st.rotation_repr}  action {st.action_q01.shape}  "
+              f"history {st.history_mean.shape}  gripper_dims={st.gripper_dims}\n"
+              f"    gripper quantiles {q}  "
+              f"lag_ticks={st.provenance.get('lag_ticks')}  "
+              f"num_chunks={st.provenance.get('num_chunks')}")
+
+    # --- every candidate must describe the SAME normalization -----------------
+    ref, ref_path, _ = loaded[0]
+    for o, o_path, _ in loaded[1:]:
         deltas = []
-        if o.rotation_repr != src.rotation_repr:
-            deltas.append(f"rotation_repr {o.rotation_repr!r} vs {src.rotation_repr!r}")
-        for name, x, y in (("action_q01", o.action_q01, src.action_q01),
-                           ("action_q99", o.action_q99, src.action_q99)):
+        if o.rotation_repr != ref.rotation_repr:
+            deltas.append(f"rotation_repr {o.rotation_repr!r} vs {ref.rotation_repr!r}")
+        pairs = [("action_q01", o.action_q01, ref.action_q01),
+                 ("action_q99", o.action_q99, ref.action_q99)]
+        # History grids are only comparable at equal height: a gripper_token
+        # COMPUTE legitimately produces a shorter one.
+        if o.history_mean.shape == ref.history_mean.shape:
+            pairs += [("history_mean", o.history_mean, ref.history_mean),
+                      ("history_std", o.history_std, ref.history_std)]
+        for name, x, y in pairs:
             if x.shape != y.shape:
                 deltas.append(f"{name} shape {x.shape} vs {y.shape}")
             elif not np.array_equal(x, y):
                 deltas.append(f"{name} differs (max |delta| {np.abs(x - y).max():.3e})")
-        if o.gripper_dims != src.gripper_dims:
-            deltas.append(f"gripper_dims {o.gripper_dims} vs {src.gripper_dims}")
-        for name, x, y in (("gripper_q01", o.gripper_q01, src.gripper_q01),
-                           ("gripper_q99", o.gripper_q99, src.gripper_q99)):
-            # NaN == NaN is False; both-NaN is agreement here (old artifacts)
-            if not (x == y or (x != x and y != y)):
+        if o.gripper_dims != ref.gripper_dims:
+            deltas.append(f"gripper_dims {o.gripper_dims} vs {ref.gripper_dims}")
+        for name, x, y in (("gripper_q01", o.gripper_q01, ref.gripper_q01),
+                           ("gripper_q99", o.gripper_q99, ref.gripper_q99)):
+            # NaN is ABSENCE, not disagreement: an artifact written before the
+            # field existed is a SUBSET of one written after, not a conflict with
+            # it. `umi` predates gripper_q01/q99 (they arrived with
+            # state_mode="gripper_token", in c4cecbb) and treating its NaN as a
+            # mismatch blocked a restore that was entirely correct. Two DIFFERENT
+            # non-NaN values remain a real conflict.
+            if x != x or y != y:
+                continue
+            if x != y:
                 deltas.append(f"{name} {x} vs {y}")
         if deltas:
-            problems.append(f"{o_path} disagrees with the source: " + "; ".join(deltas))
+            problems.append(f"{o_path} disagrees with {ref_path}: " + "; ".join(deltas))
+    if not problems and len(loaded) > 1:
+        print(f"\nall {len(loaded)} candidates agree on the action grid and gripper "
+              "dims — one staging file legitimately serves every run")
+
+    # --- pick the first USABLE candidate --------------------------------------
+    # Usable is not the same as "first given": the older checkpoint of a pair can
+    # be the one that cannot serve, because it predates the gripper quantiles.
+    src = src_path = None
+    skipped = []
+    for st, path, _ in loaded:
+        why = []
+        if st.rotation_repr != a.rotation_repr:
+            why.append(f"is {st.rotation_repr!r}, not {a.rotation_repr!r}")
+        if st.history_mean.shape[0] != cfg.n_lags:
+            why.append(f"has a {st.history_mean.shape[0]}-lag history grid, not "
+                       f"{cfg.n_lags} — a history run would raise in NormalizeHistory")
+        if st.gripper_q01 != st.gripper_q01:
+            why.append("carries no gripper quantiles (predates the field) — a "
+                       "gripper_token run refuses to digitize without them")
+        if why:
+            skipped.append(f"{path}: " + "; ".join(why))
         else:
-            print(f"agrees: {o_path}  (action grid, gripper dims and quantiles "
-                  f"identical; its {o.history_mean.shape[0]}-lag history grid is "
-                  "unused in gripper_token mode)")
+            src, src_path = st, path
+            break
+    if src is None:
+        problems.append("no candidate can serve as the source:\n      "
+                        + "\n      ".join(skipped))
+    else:
+        for s in skipped:
+            print(f"\nskipped as source: {s}")
+        print(f"\nchosen source: {src_path}")
 
     # Reported, never enforced: a difference here does not make the restore
     # wrong (the source is what the run trained on, by definition), it tells you
     # whether recomputing WOULD have been safe. Equal grids mean the pipeline is
     # reproducible and the caution cost nothing; unequal grids mean recomputing
     # would have silently changed the target distribution mid-run.
-    if a.compare_with is not None:
+    if a.compare_with is not None and src is not None:
         from ego2g1.train import norm as _norm
 
         other = _norm.load_umi(a.compare_with)
